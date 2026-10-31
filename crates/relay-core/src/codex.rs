@@ -1,0 +1,343 @@
+use anyhow::{anyhow, bail, ensure, Context, Result};
+use serde_json::{json, Value};
+use std::{collections::{HashMap, HashSet}, path::Path, sync::{Arc, Mutex as StdMutex}, time::Duration};
+use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{ChildStdin, Command}, sync::{broadcast, oneshot, Mutex, RwLock}};
+use tokio_util::sync::CancellationToken;
+pub use crate::discovery::discover;
+
+type Pending = StdMutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>;
+pub struct Codex {
+    path: RwLock<String>,
+    client: Mutex<Option<Arc<Client>>>,
+    pub events: broadcast::Sender<Value>,
+}
+struct Approval { rpc_id: Value, message: Value }
+struct Client {
+    writer: Mutex<ChildStdin>,
+    pending: Pending,
+    approvals: StdMutex<HashMap<String, Approval>>,
+    active: StdMutex<HashMap<String, String>>,
+    unmaterialized: StdMutex<HashMap<String, Value>>,
+    archived: StdMutex<HashSet<String>>,
+    resume_lock: Mutex<()>,
+    start_locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    ended: CancellationToken,
+}
+fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
+
+impl Codex {
+    pub fn new(path: String) -> Arc<Self> {
+        let (events, _) = broadcast::channel(1024);
+        Arc::new(Self { path: RwLock::new(path), client: Mutex::new(None), events })
+    }
+    pub async fn set_path(&self, path: String) {
+        *self.path.write().await = path;
+        if let Some(client) = self.client.lock().await.take() { client.ended.cancel(); }
+    }
+    pub async fn shutdown(&self) {
+        if let Some(client) = self.client.lock().await.take() { client.ended.cancel(); }
+    }
+    async fn get(&self) -> Result<Arc<Client>> {
+        let mut slot = self.client.lock().await;
+        if let Some(client) = slot.as_ref().filter(|c| !c.ended.is_cancelled()) { return Ok(client.clone()); }
+        let executable = discover(&self.path.read().await)?;
+        let mut cmd = if executable.extension().is_some_and(|v| v.to_string_lossy().eq_ignore_ascii_case("js")) {
+            let mut cmd = Command::new(crate::discovery::node_executable()?); cmd.arg(&executable); cmd
+        } else { Command::new(&executable) };
+        cmd.arg("app-server").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+        #[cfg(windows)] cmd.creation_flags(0x08000000);
+        let mut child = cmd.spawn().context("无法启动 Codex，请检查可执行文件和本机登录配置")?;
+        let writer = child.stdin.take().ok_or_else(|| anyhow!("无法连接 Codex stdin"))?;
+        let stdout = child.stdout.take().ok_or_else(|| anyhow!("无法连接 Codex stdout"))?;
+        let client = Arc::new(Client { writer:Mutex::new(writer),pending:StdMutex::new(HashMap::new()),approvals:StdMutex::new(HashMap::new()),active:StdMutex::new(HashMap::new()),unmaterialized:StdMutex::new(HashMap::new()),archived:StdMutex::new(HashSet::new()),resume_lock:Mutex::new(()),start_locks:StdMutex::new(HashMap::new()),ended:CancellationToken::new() });
+        let reader_client = client.clone();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout);
+            let result: Result<()> = async {
+                loop {
+                    let mut line = String::new();
+                    let size = tokio::select! {
+                        _ = reader_client.ended.cancelled() => break,
+                        result = reader.read_line(&mut line) => result?,
+                    };
+                    if size == 0 { break; }
+                    ensure!(size <= crate::model::MAX_MESSAGE, "Codex 消息超过大小限制");
+                    let Ok(mut msg) = serde_json::from_str::<Value>(&line) else { continue };
+                    if msg.get("method").is_some() {
+                        if let Some(rpc_id) = msg.get("id").cloned() {
+                            let id = uuid::Uuid::new_v4().to_string();
+                            msg["id"] = json!(id);
+                            lock(&reader_client.approvals).insert(id, Approval { rpc_id, message:msg.clone() });
+                        }
+                        match msg["method"].as_str().unwrap_or_default() {
+                            "turn/started" => {
+                                if let (Some(thread), Some(turn)) = (msg["params"]["threadId"].as_str(), msg["params"]["turn"]["id"].as_str()) {
+                                    lock(&reader_client.unmaterialized).remove(thread);
+                                    lock(&reader_client.active).insert(thread.into(),turn.into());
+                                }
+                            }
+                            "turn/completed" => { if let Some(thread) = msg["params"]["threadId"].as_str() { lock(&reader_client.active).remove(thread); } }
+                            "thread/archived" => {
+                                if let Some(thread) = msg["params"]["threadId"].as_str() {
+                                    lock(&reader_client.archived).insert(thread.into());
+                                    lock(&reader_client.unmaterialized).remove(thread);
+                                    lock(&reader_client.active).remove(thread);
+                                }
+                            }
+                            "thread/unarchived" => { if let Some(thread) = msg["params"]["threadId"].as_str() { lock(&reader_client.archived).remove(thread); } }
+                            "thread/closed" => {
+                                if let Some(thread) = msg["params"]["threadId"].as_str() {
+                                    lock(&reader_client.unmaterialized).remove(thread);
+                                    lock(&reader_client.active).remove(thread);
+                                }
+                            }
+                            "serverRequest/resolved" => {
+                                let rpc_id = &msg["params"]["requestId"];
+                                let mut approvals = lock(&reader_client.approvals);
+                                let resolved: Vec<_> = approvals.iter().filter(|(_,a)|a.rpc_id==*rpc_id).map(|(id,_)|id.clone()).collect();
+                                for id in resolved {
+                                    approvals.remove(&id);
+                                    let _=events.send(json!({"method":"relay/approvalResolved","params":{"id":id}}));
+                                }
+                            }
+                            _ => {}
+                        }
+                        let _ = events.send(msg);
+                    } else if let Some(id) = msg["id"].as_str() {
+                        if let Some(tx) = lock(&reader_client.pending).remove(id) {
+                            let value = if let Some(error) = msg.get("error") {
+                                let mut detail = error["message"].as_str().unwrap_or("Codex 请求失败").to_owned();
+                                if let Some(code) = error.get("code") { detail.push_str(&format!("（错误码：{code}）")); }
+                                if let Some(data) = error.get("data").filter(|data| !data.is_null()) { detail.push_str(&format!("；详情：{data}")); }
+                                Err(detail)
+                            } else { Ok(msg["result"].clone()) };
+                            let _ = tx.send(value);
+                        }
+                    }
+                }
+                Ok(())
+            }.await;
+            reader_client.ended.cancel();
+            for (_, tx) in lock(&reader_client.pending).drain() { let _ = tx.send(Err("Codex 进程连接已结束，提交结果可能未知，请重新读取会话".into())); }
+            lock(&reader_client.approvals).clear();
+            lock(&reader_client.active).clear();
+            lock(&reader_client.unmaterialized).clear();
+            lock(&reader_client.archived).clear();
+            let _ = events.send(json!({"method":"relay/codexExited","params":{"reason":if result.is_ok() {"Codex 进程已退出"} else {"Codex 协议流异常，请检查版本兼容性"}}}));
+        });
+        let stop = client.ended.clone();
+        tokio::spawn(async move {
+            tokio::select! { _ = stop.cancelled() => { let _ = child.kill().await; }, _ = child.wait() => { stop.cancel(); } }
+        });
+        let initialized = client.request("initialize", json!({"clientInfo":{"name":"agent_relay","title":"Relay","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true,"requiredHumanApproval":true}})).await;
+        if let Err(error) = initialized { client.ended.cancel(); bail!("Codex 协议初始化失败：{error}"); }
+        client.write(json!({"method":"initialized","params":{}})).await?;
+        *slot = Some(client.clone());
+        Ok(client)
+    }
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if method == "relay/environment" {
+            let path = discover(&self.path.read().await);
+            return match path {
+                Ok(path) => {
+                    let client = self.get().await?;
+                    let account = client.request("account/read",json!({"refreshToken":false})).await?;
+                    Ok(json!({"installed":true,"path":path.to_string_lossy(),"account":account}))
+                }
+                Err(error) => Ok(json!({"installed":false,"error":error.to_string()})),
+            };
+        }
+        let client = self.get().await?;
+        if method == "relay/pending" { return Ok(json!({"requests":lock(&client.approvals).values().map(|a|a.message.clone()).collect::<Vec<_>>()})); }
+        if method == "relay/approval" {
+            let id = params["id"].as_str().ok_or_else(|| anyhow!("缺少审批标识"))?;
+            let result = params.get("result").cloned().ok_or_else(|| anyhow!("缺少审批结果"))?;
+            let approval_method = lock(&client.approvals).get(id).map(|a|a.message["method"].as_str().unwrap_or_default().to_string()).ok_or_else(||anyhow!("审批已处理或进程已重启，请刷新"))?;
+            match approval_method.as_str() {
+                "item/commandExecution/requestApproval" => {
+                    ensure!(matches!(result["decision"].as_str(),Some("accept"|"decline"|"cancel")), "审批决定无效");
+                }
+                "item/fileChange/requestApproval" => {
+                    ensure!(matches!(result["decision"].as_str(),Some("accept"|"decline"|"cancel")), "审批决定无效");
+                }
+                "item/tool/requestUserInput" => {
+                    let questions=lock(&client.approvals).get(id).map(|a|a.message["params"]["questions"].clone()).unwrap_or(Value::Null);
+                    let questions=questions.as_array().ok_or_else(||anyhow!("补充输入问题无效"))?;
+                    let answers=result["answers"].as_object().ok_or_else(||anyhow!("补充输入格式无效"))?;
+                    ensure!(answers.len()==questions.len(),"请回答全部问题");
+                    for question in questions {
+                        let key=question["id"].as_str().ok_or_else(||anyhow!("补充输入问题标识无效"))?;
+                        let answer=answers.get(key).and_then(|a|a["answers"].as_array()).ok_or_else(||anyhow!("补充输入格式无效"))?;
+                        ensure!(!answer.is_empty() && answer.iter().all(|a|a.as_str().is_some_and(|a|!a.trim().is_empty())),"请回答全部问题");
+                    }
+                }
+                _ => bail!("此审批类型尚未支持。请保留待处理或停止当前回合，并更新 Relay"),
+            }
+            let approval = lock(&client.approvals).remove(id).ok_or_else(||anyhow!("审批已由另一端处理"))?;
+            if let Err(error) = client.write(json!({"id":approval.rpc_id.clone(),"result":result})).await {
+                lock(&client.approvals).insert(id.into(),approval); return Err(error);
+            }
+            let _ = self.events.send(json!({"method":"relay/approvalResolved","params":{"id":id}}));
+            return Ok(json!({}));
+        }
+        ensure!(matches!(method,"thread/list"|"thread/read"|"thread/start"|"thread/resume"|"thread/archive"|"thread/unarchive"|"thread/turns/list"|"thread/items/list"|"turn/start"|"turn/interrupt"|"model/list"|"account/read"|"fuzzyFileSearch"|"app/list"|"skills/list"), "不支持的 Codex 操作");
+        ensure!(params.is_object(), "参数必须是对象");
+        if matches!(method, "fuzzyFileSearch" | "app/list" | "skills/list") {
+            let allowed: &[&str] = match method {
+                "fuzzyFileSearch" => &["query", "roots", "cancellationToken"],
+                "app/list" => &["cursor", "limit", "threadId", "forceRefetch"],
+                _ => &["cwds", "forceReload"],
+            };
+            ensure!(params.as_object().unwrap().keys().all(|key| allowed.contains(&key.as_str())), "引用查询包含未开放的字段");
+            if method == "fuzzyFileSearch" {
+                let query = params["query"].as_str().ok_or_else(|| anyhow!("缺少文件查询文字"))?;
+                ensure!(query.len() <= 2048, "文件查询文字过长");
+                let roots = params["roots"].as_array().ok_or_else(|| anyhow!("缺少项目搜索目录"))?;
+                ensure!(!roots.is_empty() && roots.len() <= 4, "项目搜索目录数量无效");
+                for root in roots {
+                    let path = root.as_str().ok_or_else(|| anyhow!("项目搜索目录无效"))?;
+                    ensure!(Path::new(path).is_absolute() && Path::new(path).is_dir(), "执行电脑上的项目搜索目录无效");
+                }
+                if let Some(token) = params.get("cancellationToken").filter(|value| !value.is_null()) {
+                    ensure!(token.as_str().is_some_and(|token| token.len() <= 200), "搜索取消标识无效");
+                }
+            } else if method == "skills/list" {
+                if let Some(cwds) = params.get("cwds") {
+                    let paths = cwds.as_array().ok_or_else(|| anyhow!("技能项目目录格式无效"))?;
+                    ensure!(!paths.is_empty() && paths.len() <= 4, "技能项目目录数量无效");
+                    for path in paths {
+                        let path = path.as_str().ok_or_else(|| anyhow!("技能项目目录无效"))?;
+                        ensure!(Path::new(path).is_absolute() && Path::new(path).is_dir(), "执行电脑上的技能项目目录无效");
+                    }
+                }
+                if let Some(reload) = params.get("forceReload") { ensure!(reload.is_boolean(), "技能刷新参数无效"); }
+            } else {
+                if let Some(limit) = params.get("limit").filter(|value| !value.is_null()) {
+                    ensure!(limit.as_u64().is_some_and(|limit| limit > 0 && limit <= 100), "应用列表分页数量无效");
+                }
+                if let Some(cursor) = params.get("cursor").filter(|value| !value.is_null()) {
+                    ensure!(cursor.as_str().is_some_and(|cursor| cursor.len() <= 4096), "应用列表分页标识无效");
+                }
+                if let Some(thread) = params.get("threadId").filter(|value| !value.is_null()) {
+                    ensure!(thread.as_str().is_some_and(|thread| !thread.is_empty() && thread.len() <= 200), "应用列表会话标识无效");
+                }
+                if let Some(refresh) = params.get("forceRefetch") { ensure!(refresh.is_boolean(), "应用列表刷新参数无效"); }
+            }
+        }
+        if matches!(method,"thread/start"|"thread/resume") {
+            if let Some(path) = params["cwd"].as_str() {
+                ensure!(Path::new(path).is_absolute() && Path::new(path).is_dir(), "执行电脑上的项目目录无效");
+            }
+        }
+        // No approval/sandbox/config overrides are accepted from a remote workbench.
+        if matches!(method,"thread/start"|"thread/resume"|"turn/start") {
+            let allowed: &[&str] = match method {
+                "thread/start" => &["cwd","model"],
+                "thread/resume" => &["threadId"],
+                _ => &["threadId","input","model","effort"],
+            };
+            ensure!(params.as_object().unwrap().keys().all(|k|allowed.contains(&k.as_str())), "请求包含未开放的权限或配置字段");
+        }
+        if matches!(method, "thread/archive" | "thread/unarchive") {
+            ensure!(params.as_object().unwrap().keys().all(|key| key == "threadId"), "归档请求包含未开放的字段");
+            let thread = params["threadId"].as_str().filter(|id| !id.is_empty() && id.len() <= 200).ok_or_else(||anyhow!("缺少或无效的会话标识"))?.to_owned();
+            let start_lock = lock(&client.start_locks).entry(thread.clone()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
+            let _start_guard = start_lock.lock().await;
+            if method == "thread/archive" {
+                ensure!(!lock(&client.unmaterialized).contains_key(&thread), "发送首条消息后才可归档会话");
+                ensure!(!lock(&client.active).contains_key(&thread), "请等待当前任务结束后再归档");
+                ensure!(!lock(&client.approvals).values().any(|approval| approval.message["params"]["threadId"].as_str() == Some(thread.as_str())), "请先处理此会话的待办审批");
+            }
+            let result = client.request(method,params).await?;
+            if method == "thread/archive" {
+                lock(&client.archived).insert(thread.clone());
+                lock(&client.unmaterialized).remove(&thread);
+                lock(&client.active).remove(&thread);
+            } else {
+                lock(&client.archived).remove(&thread);
+            }
+            return Ok(result);
+        }
+        if method == "turn/start" {
+            let thread = params["threadId"].as_str().ok_or_else(||anyhow!("缺少会话标识"))?.to_string();
+            let start_lock=lock(&client.start_locks).entry(thread.clone()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
+            let _start_guard=start_lock.lock().await;
+            client.resume(&thread).await?;
+            {
+                let mut active = lock(&client.active);
+                ensure!(!active.contains_key(&thread), "此会话已有回合正在运行");
+                active.insert(thread.clone(),String::new());
+            }
+            let response = client.request(method,params).await;
+            match &response {
+                Ok(value) => {
+                    if let Some(turn) = value["turn"]["id"].as_str() {
+                        lock(&client.unmaterialized).remove(&thread);
+                        if let Some(active) = lock(&client.active).get_mut(&thread) { *active = turn.into(); }
+                    }
+                }
+                Err(_) => { lock(&client.active).remove(&thread); }
+            }
+            return response;
+        }
+        if method == "thread/resume" {
+            let thread = params["threadId"].as_str().ok_or_else(||anyhow!("缺少会话标识"))?;
+            let start_lock = lock(&client.start_locks).entry(thread.into()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
+            let _start_guard = start_lock.lock().await;
+            return client.resume(thread).await;
+        }
+        let mut result = client.request(method,params).await?;
+        if method == "thread/start" {
+            let thread = result["thread"]["id"].as_str().ok_or_else(||anyhow!("Codex 返回了无效的会话数据"))?.to_owned();
+            // A new thread is already loaded, but has no persisted history until its first turn.
+            result["relayHistoryPending"] = json!(true);
+            ensure!(!client.ended.is_cancelled(), "Codex 进程已退出，新建会话尚未保存");
+            lock(&client.unmaterialized).insert(thread,result.clone());
+        }
+        Ok(result)
+    }
+}
+impl Client {
+    async fn write(&self, value: Value) -> Result<()> {
+        ensure!(!self.ended.is_cancelled(), "Codex 进程连接已结束");
+        let mut data = serde_json::to_vec(&value)?; data.push(b'\n');
+        self.writer.lock().await.write_all(&data).await.context("Codex 写入失败")
+    }
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        lock(&self.pending).insert(id.clone(),tx);
+        if let Err(error) = self.write(json!({"id":id,"method":method,"params":params})).await { lock(&self.pending).remove(&id); return Err(error); }
+        let result = tokio::time::timeout(Duration::from_secs(90),rx).await;
+        lock(&self.pending).remove(&id);
+        match result {
+            Ok(Ok(result)) => result.map_err(|e|anyhow!(e)),
+            Ok(Err(_)) => bail!("Codex 连接已断开；请刷新会话确认提交结果"),
+            Err(_) => bail!("Codex 请求超时；不会自动重发，请刷新会话确认提交结果"),
+        }
+    }
+    async fn resume(&self, id: &str) -> Result<Value> {
+        let _guard = self.resume_lock.lock().await;
+        ensure!(!self.ended.is_cancelled(), "Codex 进程连接已结束");
+        ensure!(!lock(&self.archived).contains(id), "此会话已归档，请先恢复会话");
+        let pending = lock(&self.unmaterialized).get(id).cloned();
+        if let Some(session) = pending { return Ok(session); }
+        // Rejoin the thread to recover host permissions and subscriptions, without
+        // hydrating its entire history before the bounded turns/list request.
+        let result = self.request("thread/resume",json!({"threadId":id,"excludeTurns":true})).await.map_err(|error| anyhow!("无法接续此会话：{error:#}"))?;
+        ensure!(!self.ended.is_cancelled(), "Codex 进程连接已结束");
+        let mut active = lock(&self.active);
+        active.remove(id);
+        if result["thread"]["status"]["type"]=="active" { active.insert(id.into(),String::new()); }
+        if let Some(turns) = result["thread"]["turns"].as_array() {
+            for turn in turns {
+                if turn["status"] == "inProgress" {
+                    if let Some(turn_id) = turn["id"].as_str() { active.insert(id.into(),turn_id.into()); }
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+

@@ -1,0 +1,16 @@
+name = "agent-relay"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# 可选：使用托管在当前 Cloudflare 账号下的自定义域名。
+# routes = [{ pattern = "relay.example.com", custom_domain = true }]
+
+[durable_objects]
+bindings = [{ name = "RELAY_ROOM", class_name = "RelayRoom" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayRoom"]
+
+[observability]
+enabled = false
