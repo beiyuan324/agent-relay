@@ -81,7 +81,7 @@ export function WindowTitlebar({ onError, onMaximizedChange }: {
     <div className="window-controls" role="group" aria-label="窗口控制">
       <button type="button" className="window-control" title="最小化" aria-label="最小化窗口" disabled={!appWindow || busy} onClick={() => void act("minimize")}><Minus size={15} /></button>
       <button type="button" className="window-control" title={maximized ? "还原" : "最大化"} aria-label={maximized ? "还原窗口" : "最大化窗口"} aria-pressed={maximized} disabled={!appWindow || busy} onClick={() => void act("maximize")}>{maximized ? <Copy size={13} /> : <Square size={12} />}</button>
-      <button type="button" className="window-control window-close" title="关闭" aria-label="关闭窗口" disabled={!appWindow || busy} onClick={() => void act("close")}><X size={16} /></button>
+      <button type="button" className="window-control window-close" title="收起到托盘" aria-label="收起到系统托盘" disabled={!appWindow || busy} onClick={() => void act("close")}><X size={16} /></button>
     </div>
   </header>;
 }

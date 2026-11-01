@@ -200,6 +200,34 @@ impl Codex {
             };
         }
         let client = self.get().await?;
+        if method == "relay/projects" {
+            ensure!(params.as_object().is_some_and(|params| params.is_empty()), "项目列表不接受额外参数");
+            let desktop = tokio::task::spawn_blocking(crate::projects::read_desktop).await??;
+            let mut cursor = Value::Null;
+            let mut seen = HashSet::new();
+            let mut projects = Vec::new();
+            loop {
+                let response = client.request("project/list", json!({"cursor":cursor,"limit":100,"sortKey":"position","sortDirection":"asc"})).await;
+                let page = match response {
+                    Ok(page) => page,
+                    Err(error) => {
+                        let detail = error.to_string();
+                        if projects.is_empty() && (detail.contains("错误码：-32601") || detail.contains("unknown variant `project/list`") || detail.contains("Unknown method: project/list")) {
+                            return desktop.catalog(None);
+                        }
+                        return Err(error).context("无法读取 Codex 项目列表");
+                    }
+                };
+                let data = page["data"].as_array().ok_or_else(||anyhow!("Codex 返回了无效的项目列表"))?;
+                projects.extend(data.iter().cloned());
+                ensure!(projects.len() <= 4096, "Codex 项目数量超过读取限制");
+                cursor = page["nextCursor"].clone();
+                if cursor.is_null() { break; }
+                let next = cursor.as_str().filter(|cursor| !cursor.is_empty()).ok_or_else(||anyhow!("Codex 项目分页标识无效"))?;
+                ensure!(seen.insert(next.to_owned()), "Codex 项目分页未能继续");
+            }
+            return desktop.catalog(Some(projects));
+        }
         if method == "relay/pending" { return Ok(json!({"requests":lock(&client.approvals).values().map(|a|a.message.clone()).collect::<Vec<_>>()})); }
         if method == "relay/approval" {
             let id = params["id"].as_str().ok_or_else(|| anyhow!("缺少审批标识"))?;
@@ -281,10 +309,15 @@ impl Codex {
                 ensure!(Path::new(path).is_absolute() && Path::new(path).is_dir(), "执行电脑上的项目目录无效");
             }
         }
+        if method == "thread/start" {
+            if let Some(project) = params.get("projectId") {
+                ensure!(project.as_str().is_some_and(|id| !id.is_empty() && id.len() <= 200), "Codex 项目标识无效");
+            }
+        }
         // No approval/sandbox/config overrides are accepted from a remote workbench.
         if matches!(method,"thread/start"|"thread/resume"|"turn/start") {
             let allowed: &[&str] = match method {
-                "thread/start" => &["cwd","model"],
+                "thread/start" => &["cwd","model","projectId"],
                 "thread/resume" => &["threadId"],
                 _ => &["threadId","input","model","effort"],
             };

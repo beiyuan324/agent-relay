@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call, message, type Json, type RelayEvent } from "./api";
 import { referenceInput, type ComposerDraft } from "./mentions";
+import { EMPTY_PROJECT_CATALOG, projectCatalog, type ProjectCatalog } from "./projects";
 import { applyEvent, mergeLive, mergeApprovals, pruneCache, retainedBytes, type ApprovalUpdate } from "./workbench-state";
 export { applyEvent } from "./workbench-state";
 
 const keyOf = (device: string, thread: string) => JSON.stringify([device, thread]);
-const selectionKeyOf = (device: string, archived: boolean) => JSON.stringify([device, archived]);
 export function useWorkbench(device: string, available: boolean, onError: (error: string) => void) {
   const [threads, setThreads] = useState<Json[]>([]);
-  const [archivedView, setArchivedView] = useState(false);
+  const [archiveExpanded, setArchiveExpanded] = useState(false);
+  const [archivedThreads, setArchivedThreads] = useState<Json[]>([]);
+  const archivedListed = useRef(archivedThreads); archivedListed.current = archivedThreads;
+  const [archivedNextCursor, setArchivedNextCursor] = useState<string | null>(null);
+  const [archivedLoading, setArchivedLoading] = useState(false);
+  const [archivedError, setArchivedError] = useState("");
   const [archiveBusy, setArchiveBusy] = useState<Record<string, boolean>>({});
   const archiveMutations = useRef(new Set<string>());
   const archiveFlags = useRef<Record<string, boolean>>({});
@@ -33,17 +38,23 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const [sending, setSending] = useState(false);
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [environmentRevision, setEnvironmentRevision] = useState(0);
+  const [projectRevision, setProjectRevision] = useState(0);
+  const [projectState, setProjectState] = useState<{ device: string; value: ProjectCatalog }>({ device, value: EMPTY_PROJECT_CATALOG });
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsError, setProjectsError] = useState("");
   const refreshTargets = useRef(new Set<string>());
-  const active = useRef({ device, selected, available, archivedView });
-  active.current = { device, selected, available, archivedView };
+  const active = useRef({ device, selected, available, archiveExpanded });
+  active.current = { device, selected, available, archiveExpanded };
   const events = useRef<Record<string, { turns: Record<string, number> }>>({});
   const approvalUpdates = useRef<Record<string, Map<string, ApprovalUpdate>>>({});
   const pendingEvents = useRef<{ key: string; id: string; value: Json; receivedAt: number }[]>([]);
   const pendingBytes = useRef(0);
   const scheduled = useRef<{ frame: number; timer: number } | null>(null);
   const sequence = useRef(0);
-  const selection = useRef<Record<string, string>>({});
+  const selection = useRef<Record<string, { id: string; archived: boolean }>>({});
+  const listDevice = useRef(device);
   const listEpoch = useRef(0);
+  const archivedListEpoch = useRef(0);
   const openEpoch = useRef(0);
   const processEpoch = useRef<Record<string, number>>({});
   const sendingRef = useRef(false);
@@ -108,15 +119,48 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     approvalUpdates.current[target]?.set(String(id), { sequence: ++sequence.current, request });
   }, []);
 
-  const fetchList = useCallback(async (cursor: string | null = null, term = "") => {
-    if (!active.current.available) return;
+  useEffect(() => {
+    if (!available) { setProjectsLoading(false); setProjectsError(""); return; }
+    let stopped = false, fetching = false;
+    const target = device;
+    const load = async () => {
+      if (fetching || stopped) return;
+      fetching = true;
+      setProjectsLoading(true);
+      try {
+        const value = projectCatalog(await call(target, "relay/projects", {}));
+        if (!stopped) {
+          setProjectState(previous => previous.device === target && JSON.stringify(previous.value) === JSON.stringify(value) ? previous : { device: target, value });
+          setProjectsError("");
+        }
+      } catch (error) {
+        if (!stopped) setProjectsError("无法同步 Codex 项目：" + message(error));
+      } finally {
+        fetching = false;
+        if (!stopped) setProjectsLoading(false);
+      }
+    };
+    void load();
+    const focus = () => { if (document.visibilityState === "visible") void load(); };
+    const timer = window.setInterval(focus, 30000);
+    window.addEventListener("focus", focus);
+    return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("focus", focus); };
+  }, [device, available, environmentRevision, projectRevision]);
+
+  const fetchList = useCallback(async (cursor: string | null = null, term = "", archived = false) => {
+    if (!active.current.available || (archived && !active.current.archiveExpanded)) return;
     const target = active.current.device;
-    const archived = active.current.archivedView;
-    const epoch = ++listEpoch.current;
-    setLoading(true);
+    const epochs = archived ? archivedListEpoch : listEpoch;
+    const epoch = ++epochs.current;
+    const loading = archived ? setArchivedLoading : setLoading;
+    const rows = archived ? setArchivedThreads : setThreads;
+    const nextCursor = archived ? setArchivedNextCursor : setNextCursor;
+    loading(true);
+    if (archived) setArchivedError("");
+    const current = () => epoch === epochs.current && target === active.current.device && active.current.available && (!archived || active.current.archiveExpanded);
     try {
       const result = await call(target, "thread/list", { cursor, limit: 40, sortKey: "updated_at", archived, ...(term ? { searchTerm: term } : {}) });
-      if (epoch !== listEpoch.current || target !== active.current.device || archived !== active.current.archivedView) return;
+      if (!current()) return;
       const data: Json[] = (result.data || []).map((thread: Json) => ({ ...thread, relayArchived: archived }));
       for (const thread of data) {
         archiveFlags.current[keyOf(target, thread.id)] = archived;
@@ -126,24 +170,30 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       const pending = archived ? [] : Object.entries(newThreads.current)
         .filter(([key, thread]) => JSON.parse(key)[0] === target && (!query || [thread.name, thread.preview, thread.cwd].some(value => typeof value === "string" && value.toLocaleLowerCase().includes(query))))
         .map(([, thread]) => thread);
-      setThreads(previous => {
-        const rows = cursor ? [...previous, ...data.filter(thread => !previous.some(row => row.id === thread.id))] : data;
-        return [...pending, ...rows.filter(thread => !pending.some(row => row.id === thread.id))];
+      rows(previous => {
+        const listed = cursor ? [...previous, ...data.filter(thread => !previous.some(row => row.id === thread.id))] : data;
+        return [...pending, ...listed.filter(thread => !pending.some(row => row.id === thread.id))];
       });
-      setNextCursor(result.nextCursor || null);
-    } catch (error) { if (epoch === listEpoch.current) onErrorRef.current(message(error)); }
-    finally { if (epoch === listEpoch.current) setLoading(false); }
+      nextCursor(result.nextCursor || null);
+    } catch (error) {
+      if (current()) {
+        if (archived) setArchivedError(message(error));
+        else onErrorRef.current(message(error));
+      }
+    } finally { if (current()) loading(false); }
   }, []);
 
   useEffect(() => {
-    ++listEpoch.current; ++openEpoch.current;
+    ++listEpoch.current; ++archivedListEpoch.current; ++openEpoch.current;
+    if (listDevice.current !== device) { listDevice.current = device; active.current.archiveExpanded = false; setArchiveExpanded(false); }
     for (const key of resumed.current) if (JSON.parse(key)[0] === device) resumed.current.delete(key);
     setSessions(previous => Object.fromEntries(Object.entries(previous).map(([key, session]) =>
       [key, JSON.parse(key)[0] === device ? { ...session, ready: false } : session])));
-    const restore = selection.current[selectionKeyOf(device, active.current.archivedView)] || null;
-    setThreads(active.current.archivedView ? [] : Object.entries(newThreads.current).filter(([key]) => JSON.parse(key)[0] === device).map(([, thread]) => thread)); setSelected(restore); setEnvironment(null); setModels([]); setPermissions(null); setSearch(""); setNextCursor(null); setOlderCursor(null); setOpening(false); setSending(false); setLoading(false);
+    const restore = selection.current[device];
+    setThreads(Object.entries(newThreads.current).filter(([key]) => JSON.parse(key)[0] === device).map(([, thread]) => thread)); setSelected(restore?.id || null); setEnvironment(null); setModels([]); setPermissions(null); setSearch(""); setNextCursor(null); setOlderCursor(null); setOpening(false); setSending(false); setLoading(false);
+    setArchivedThreads([]); setArchivedNextCursor(null); setArchivedLoading(false); setArchivedError("");
     if (!available) return;
-    if (restore) void open(restore);
+    if (restore) void open(restore.id, restore.archived);
     let stopped = false;
     const target = device;
     const refresh = refreshTargets.current.delete(target);
@@ -180,24 +230,33 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     if (!available) return;
     const timer = window.setTimeout(() => { void fetchList(null, search.trim()); }, 250);
     return () => window.clearTimeout(timer);
-  }, [device, available, search, archivedView, listRevision, fetchList, environmentRevision]);
+  }, [device, available, search, listRevision, fetchList, environmentRevision]);
 
-  const open = useCallback(async (id: string) => {
+  useEffect(() => {
+    ++archivedListEpoch.current;
+    setArchivedLoading(available && archiveExpanded); setArchivedError("");
+    setArchivedThreads([]); setArchivedNextCursor(null);
+    if (!available || !archiveExpanded) return;
+    const timer = window.setTimeout(() => { void fetchList(null, search.trim(), true); }, 250);
+    return () => window.clearTimeout(timer);
+  }, [device, available, search, archiveExpanded, listRevision, fetchList, environmentRevision]);
+
+  const open = useCallback(async (id: string, archivedHint?: boolean) => {
     const target = active.current.device;
     if (!active.current.available) return;
     flushEvents();
     const key = keyOf(target, id);
     if (archiveMutations.current.has(key)) return;
-    const archived = archiveFlags.current[key] ?? active.current.archivedView;
-    if (archived !== active.current.archivedView) return;
+    const archived = archivedHint ?? archiveFlags.current[key] ?? false;
+    if (archiveFlags.current[key] !== undefined && archiveFlags.current[key] !== archived) return;
     const epoch = ++openEpoch.current;
     const startedAt = sequence.current;
-    selection.current[selectionKeyOf(target, archived)] = id;
+    selection.current[target] = { id, archived };
     resumed.current.delete(key);
     setSessions(previous => ({ ...previous, [key]: { ready: false } }));
     active.current = { ...active.current, selected: id };
     setSelected(id); setOpening(true); setPermissions(null); setOlderCursor(null);
-    const summary = listed.current.find(thread => thread.id === id);
+    const summary = (archived ? archivedListed.current : listed.current).find(thread => thread.id === id);
     setCache(previous => ({ ...previous, [key]: { ...summary, ...previous[key], id, relayArchived: archived, turns: previous[key]?.turns || [] } }));
     try {
       let result: Json | undefined;
@@ -264,16 +323,12 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     } finally { if (epoch === openEpoch.current) setOpening(false); }
   }, [flushEvents, setCache]);
 
-  const showArchived = useCallback((archived: boolean) => {
-    if (archived === active.current.archivedView) return;
-    const target = active.current.device;
-    ++listEpoch.current; ++openEpoch.current;
-    active.current = { ...active.current, archivedView: archived, selected: null };
-    setArchivedView(archived); setThreads([]); setSelected(null); setNextCursor(null); setOlderCursor(null);
-    setPermissions(null); setOpening(false); setLoading(active.current.available);
-    const restore = selection.current[selectionKeyOf(target, archived)];
-    if (restore && active.current.available) void open(restore);
-  }, [open]);
+  const toggleArchive = useCallback(() => {
+    const expanded = !active.current.archiveExpanded;
+    active.current = { ...active.current, archiveExpanded: expanded };
+    if (!expanded) { ++archivedListEpoch.current; setArchivedLoading(false); }
+    setArchiveExpanded(expanded);
+  }, []);
 
   const applyArchiveState = useCallback((target: string, id: string, archived: boolean) => {
     const key = keyOf(target, id);
@@ -283,14 +338,12 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     resumed.current.delete(key);
     setSessions(previous => ({ ...previous, [key]: { ready: false } }));
     setCache(previous => previous[key] ? { ...previous, [key]: { ...previous[key], relayArchived: archived } } : previous);
-    for (const mode of [false, true]) {
-      const selectionKey = selectionKeyOf(target, mode);
-      if (selection.current[selectionKey] === id) delete selection.current[selectionKey];
-    }
+    if (selection.current[target]?.id === id) delete selection.current[target];
     if (target !== active.current.device) return;
-    ++listEpoch.current;
-    setLoading(false); setNextCursor(null);
+    ++listEpoch.current; ++archivedListEpoch.current;
+    setLoading(false); setNextCursor(null); setArchivedLoading(false); setArchivedNextCursor(null);
     setThreads(previous => previous.filter(thread => thread.id !== id));
+    setArchivedThreads(previous => previous.filter(thread => thread.id !== id));
     if (active.current.selected === id) {
       ++openEpoch.current;
       active.current = { ...active.current, selected: null };
@@ -338,6 +391,13 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       recordApproval(target, String(p.id ?? p.requestId));
       setRequests(previous => ({ ...previous, [target]: (previous[target] || []).filter(r => r.id !== (p.id || p.requestId)) }));
     }
+    if (value.method === "project/changed" || value.method === "thread/project/updated") {
+      if (target === active.current.device) {
+        setProjectRevision(previous => previous + 1);
+        setListRevision(previous => previous + 1);
+      }
+      return;
+    }
     const id = p.threadId || p.thread?.id;
     if (!id) return;
     const key = keyOf(target, id);
@@ -347,7 +407,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     }
     if (value.method === "turn/started" && newThreads.current[key]) newThreads.current[key].relayHistoryPending = false;
     if (value.method === "thread/started" && p.thread && newThreads.current[key]) newThreads.current[key] = { ...newThreads.current[key], ...p.thread };
-    if (target === active.current.device && !active.current.archivedView && archiveFlags.current[key] !== true && value.method === "thread/started" && p.thread) {
+    if (target === active.current.device && archiveFlags.current[key] !== true && value.method === "thread/started" && p.thread) {
       setThreads(previous => [p.thread, ...previous.filter(t => t.id !== p.thread.id)]);
     }
     if (!cached.current[key] && key !== keyOf(active.current.device, active.current.selected || "")) return;
@@ -401,12 +461,12 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     }
   };
 
-  const create = async (cwd: string, model: string, expectedDevice: string) => {
+  const create = async (cwd: string, model: string, expectedDevice: string, projectId?: string) => {
     const target = active.current.device;
     if (target !== expectedDevice || !active.current.available) throw new Error("执行电脑已切换或离线，请重新选择设备后新建会话");
     const epoch = openEpoch.current;
     const generation = processEpoch.current[target] || 0;
-    const result = await call(target, "thread/start", { cwd, ...(model ? { model } : {}) });
+    const result = await call(target, "thread/start", { cwd, ...(model ? { model } : {}), ...(projectId ? { projectId } : {}) });
     if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，新建会话尚未保存，请重新新建会话");
     const thread = result.thread;
     if (!thread?.id) throw new Error("Codex 返回了无效的会话数据");
@@ -415,16 +475,15 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     setCache(previous => ({ ...previous, [key]: { ...previous[key], ...thread, turns: previous[key]?.turns || thread.turns || [] } }));
     if (target !== active.current.device) return;
     if (epoch !== openEpoch.current || !active.current.available) {
-      if (!active.current.archivedView) setThreads(previous => [thread, ...previous.filter(t => t.id !== thread.id)]);
+      setThreads(previous => [thread, ...previous.filter(t => t.id !== thread.id)]);
       return;
     }
     ++openEpoch.current; ++listEpoch.current;
     setListRevision(previous => previous + 1);
-    const wasArchived = active.current.archivedView;
-    active.current = { ...active.current, archivedView: false, selected: thread.id };
-    setArchivedView(false); setLoading(false); setNextCursor(null);
-    setThreads(previous => [thread, ...(wasArchived ? [] : previous.filter(t => t.id !== thread.id))]);
-    selection.current[selectionKeyOf(target, false)] = thread.id;
+    active.current = { ...active.current, selected: thread.id };
+    setLoading(false); setNextCursor(null);
+    setThreads(previous => [thread, ...previous.filter(t => t.id !== thread.id)]);
+    selection.current[target] = { id: thread.id, archived: false };
     resumed.current.add(key);
     setSelected(thread.id); setOpening(false); setSearch(""); setOlderCursor(null);
     setPermissions({ approvalPolicy: result.approvalPolicy, sandbox: result.sandbox, model: result.model, reasoningEffort: result.reasoningEffort });
@@ -498,12 +557,17 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   };
   return {
     threads, selected, thread, models, environment, permissions, requests: requests[device] || [],
-    archivedView, showArchived, changeArchive, archiveReason,
+    projectCatalog: projectState.device === device && available ? projectState.value : EMPTY_PROJECT_CATALOG,
+    projectsLoading, projectsError,
+    archivedThreads, archivedNextCursor, archivedLoading, archivedError, archiveExpanded, toggleArchive,
+    changeArchive, archiveReason,
     isArchiveBusy: (id: string) => !!archiveBusy[keyOf(device, id)],
     search, setSearch, nextCursor, loading, opening, sending, activeTurn, olderCursor,
     ready, resumeError: session?.resumeError, historyError: session?.historyError,
     open, event, create, send, stop, resolve, older,
     refresh: () => { refreshTargets.current.add(active.current.device); setEnvironmentRevision(previous => previous + 1); },
     loadMore: () => fetchList(nextCursor, search.trim()),
+    loadMoreArchived: () => fetchList(archivedNextCursor, search.trim(), true),
+    retryArchived: () => fetchList(null, search.trim(), true),
   };
 }

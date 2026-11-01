@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { AtSign, Blocks, File, Folder, Loader2, RefreshCw, Sparkles, X } from "lucide-react";
 import { call, folder, message, type Json } from "./api";
 import { editDraft, fileTarget, insertMention, matchesMention, mentionTrigger, removeMention, validMentions, type ComposerDraft, type MentionKind, type MentionTarget } from "./mentions";
@@ -62,10 +63,36 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
   const [cancellationToken] = useState(() => crypto.randomUUID());
   const catalogCache = useRef<{ key: string; value: Catalog } | null>(null);
   const list = useRef<HTMLDivElement>(null);
+  const anchor = useRef<HTMLDivElement>(null);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({ visibility: "hidden" });
   const menuId = useId();
   const trigger = mentionTrigger(draft, caret.start, caret.end);
   const open = enabled && !composing && !!trigger && dismissed !== trigger.key;
   const query = trigger?.query || "";
+
+  useLayoutEffect(() => {
+    if (!open || !anchor.current) return;
+    const element = anchor.current;
+    const update = () => {
+      const rect = element.getBoundingClientRect();
+      const topInset = document.querySelector(".window-titlebar")?.getBoundingClientRect().bottom || 0;
+      setMenuStyle({
+        left: rect.left, width: rect.width, bottom: window.innerHeight - rect.top + 12,
+        maxHeight: Math.max(0, Math.min(420, rect.top - topInset - 24)),
+      });
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    if (element.parentElement) observer.observe(element.parentElement);
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -140,8 +167,8 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
   };
   const loading = ((tab === "all" || tab === "files") && fileLoading) || (tab !== "files" && catalog.loading);
   const errors = [...((tab === "all" || tab === "files") && fileError ? ["文件：" + fileError] : []), ...(tab !== "files" ? catalog.errors : [])];
-  return <div className="mention-composer">
-    {open && <div className="mention-menu">
+  return <div className="mention-composer" ref={anchor}>
+    {open && createPortal(<div className="mention-menu" style={menuStyle}>
       <div className="mention-menu-heading"><AtSign size={15} /><strong>引用</strong><span title={deviceName}>{deviceName}</span><button type="button" className="icon-button" title="刷新引用列表" aria-label="刷新引用列表" onMouseDown={event => event.preventDefault()} onClick={() => setRevision(previous => previous + 1)}><RefreshCw size={13} /></button></div>
       <div className="mention-tabs" role="group" aria-label="引用类型">{tabs.map(item => <button type="button" key={item.id} aria-pressed={tab === item.id} className={tab === item.id ? "selected" : ""} onMouseDown={event => event.preventDefault()} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
       <div className="mention-options" id={menuId} role="listbox" aria-label="选择引用" aria-busy={loading} ref={list}>
@@ -154,7 +181,7 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
       {!query && (tab === "all" || tab === "files") && <div className="mention-search-hint">{cwd ? "继续输入可搜索项目文件和目录。" : "当前会话未提供项目路径，无法搜索文件。"}</div>}
       {!!errors.length && <details className="mention-query-errors"><summary>部分候选暂不可用</summary>{errors.map((error, index) => <p key={index}>{error}</p>)}</details>}
       <div className="mention-menu-footer">↑↓ 选择 · Enter / Tab 插入 · Esc 关闭</div>
-    </div>}
+    </div>, document.body)}
     <textarea ref={inputRef} aria-label={"向 " + deviceName + " 发送消息"} role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined} aria-activedescendant={open && options[activeIndex] ? menuId + "-" + activeIndex : undefined} placeholder={placeholder} value={draft.text} rows={2}
       onChange={event => { onChange(editDraft(draft, event.target.value)); setCaret({ start: event.target.selectionStart, end: event.target.selectionEnd }); }}
       onSelect={event => setCaret({ start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd })}

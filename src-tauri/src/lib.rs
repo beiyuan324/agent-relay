@@ -7,6 +7,8 @@ use std::{collections::VecDeque, io::Write, path::PathBuf, sync::Arc};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 
+mod tray;
+
 struct Desktop {
     host: Arc<Host>,
     path: PathBuf,
@@ -138,6 +140,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .on_window_event(tray::on_window_event)
         .setup(|app|{
             let directories=ProjectDirs::from("app","agent-relay","Relay").ok_or_else(||anyhow!("无法定位用户设置目录"))?;
             let path=directories.config_dir().join("settings.json");
@@ -150,6 +153,7 @@ pub fn run() {
             let host=Host::new(settings);
             let state=Arc::new(Desktop{host:host.clone(),path,mutation:Mutex::new(()),saved:Mutex::new(None),diagnostics:Mutex::new(VecDeque::new())});
             app.manage(state.clone());
+            tray::setup(app)?;
             let handle=app.handle().clone();
             tauri::async_runtime::block_on(async move {
                 // Subscribe before listeners or reconnection tasks can emit state.
