@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "build": "tsc --noEmit && wrangler deploy --dry-run",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {

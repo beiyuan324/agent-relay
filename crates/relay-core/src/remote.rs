@@ -66,3 +66,55 @@ impl Assembler {
         Ok(Some(control))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn encrypted_fragmented_messages_round_trip_and_reject_replay() {
+        let (a_out, b_in) = tokio::sync::mpsc::channel(512);
+        let (b_out, a_in) = tokio::sync::mpsc::channel(512);
+        let mut a = Transport { outgoing: a_out, incoming: a_in };
+        let mut b = Transport { outgoing: b_out, incoming: b_in };
+        let code = crate::crypto::new_code();
+        let (a_keys, b_keys) = tokio::join!(handshake(&mut a, &code, true), handshake(&mut b, &code, false));
+        let (mut sender, _) = a_keys.unwrap();
+        let (_, mut receiver) = b_keys.unwrap();
+        let control = Control::Event { message: json!({"text":"你好".repeat(100_000)}) };
+        send(&a.outgoing, &mut sender, &control).await.unwrap();
+        let mut assembler = Assembler::default();
+        let mut frames = 0;
+        let restored = loop {
+            let Wire::Binary(frame) = b.incoming.recv().await.unwrap() else { panic!("expected ciphertext"); };
+            let plaintext = receiver.open(&frame).unwrap();
+            assert!(receiver.open(&frame).is_err(), "replayed ciphertext must be rejected");
+            frames += 1;
+            if let Some(control) = assembler.consume(serde_json::from_slice(&plaintext).unwrap()).unwrap() { break control; }
+        };
+        assert!(frames > 1);
+        assert_eq!(serde_json::to_value(restored).unwrap(), serde_json::to_value(control).unwrap());
+    }
+
+    #[test]
+    fn rejects_out_of_order_or_nested_fragments() {
+        let mut assembler = Assembler::default();
+        assert!(assembler.consume(Control::Fragment { id:"x".into(), index:1, total:2, b:STANDARD.encode(b"x") }).is_err());
+        let nested = serde_json::to_vec(&Control::Fragment { id:"nested".into(), index:0, total:1, b:String::new() }).unwrap();
+        assert!(Assembler::default().consume(Control::Fragment { id:"outer".into(), index:0, total:1, b:STANDARD.encode(nested) }).is_err());
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_a_different_pairing_secret() {
+        let (a_out, b_in) = tokio::sync::mpsc::channel(8);
+        let (b_out, a_in) = tokio::sync::mpsc::channel(8);
+        let mut a = Transport { outgoing:a_out, incoming:a_in };
+        let mut b = Transport { outgoing:b_out, incoming:b_in };
+        let (initiator, _) = tokio::join!(
+            handshake(&mut a, "secret-a", true),
+            tokio::time::timeout(Duration::from_millis(100), handshake(&mut b, "secret-b", false)),
+        );
+        assert!(initiator.is_err());
+    }
+}

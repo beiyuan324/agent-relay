@@ -179,10 +179,28 @@ export class RelayRoom implements DurableObject {
     } catch {
       return;
     }
+    // Demoted agents may still have queued frames; only registration is
+    // accepted until the socket owns the room again.
+    const attachment = ws.deserializeAttachment() as AgentAtt | undefined;
+    if (msg.t !== "register" && !attachment?.reg) return;
     switch (msg.t) {
       case "register": {
-        // Same pairing, second agent: the newcomer wins, the old one gets
-        // 4000. Demote first so the loser's own close handler is a no-op.
+        if (attachment?.reg) {
+          this.#send(ws, JSON.stringify({ t: "registered" }));
+          return;
+        }
+        // Close the old encrypted sessions: the replacement cannot inherit
+        // their tunnel IDs or encryption state.
+        for (const phone of this.#state.getWebSockets("phone")) {
+          const pa = phone.deserializeAttachment() as PhoneAtt | undefined;
+          if (!pa?.id) continue;
+          pa.id = null;
+          pa.deadline = null;
+          phone.serializeAttachment(pa);
+          try { phone.close(1012, "agent replaced"); } catch {}
+        }
+        this.#phones.clear();
+        // Demote before closing so the old agent's close callback is a no-op.
         for (const other of this.#state.getWebSockets("agent")) {
           if (other === ws) continue;
           other.serializeAttachment({ role: "agent", reg: false } as AgentAtt);
@@ -194,7 +212,7 @@ export class RelayRoom implements DurableObject {
         this.#send(ws, JSON.stringify({ t: "registered" }));
         for (const p of this.#state.getWebSockets("phone")) {
           const pa = p.deserializeAttachment() as PhoneAtt | undefined;
-          if (pa && !pa.id) await this.#openTunnel(p, pa);
+          if (pa && !pa.id && pa.deadline !== null) await this.#openTunnel(p, pa);
         }
         break;
       }
@@ -227,6 +245,8 @@ export class RelayRoom implements DurableObject {
   }
 
   async #onPhoneMessage(ws: WebSocket, att: PhoneAtt, message: string | ArrayBuffer): Promise<void> {
+    // An ID-less phone without a deadline has already been closed.
+    if (!att.id && att.deadline === null) return;
     if (att.id) {
       // Tunnel open: blind-forward. If the agent is gone its close handler
       // is already closing this phone — drop the frame, as before.

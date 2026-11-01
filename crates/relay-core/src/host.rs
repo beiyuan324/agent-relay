@@ -190,8 +190,9 @@ impl Host {
                     incoming=transport.incoming.recv()=>{
                         let Some(Wire::Binary(bytes))=incoming else{bail!("设备连接已断开")};
                         let plaintext=receive_cipher.open(&bytes)?;
-                        let Some(control)=assembler.consume(serde_json::from_slice(&plaintext)?)? else{continue};
+                        let control=assembler.consume(serde_json::from_slice(&plaintext)?)?;
                         last=Instant::now();
+                        let Some(control)=control else{continue};
                         match control {
                             Control::Hello{version,identity,approved,sharing}=>{
                                 ensure!(!hello_received && version==CONTROL_VERSION,"控制协议版本或顺序不兼容");
@@ -231,8 +232,10 @@ impl Host {
                                 let host=self.clone();let connection=connection.clone();
                                 tokio::spawn(async move {
                                     let _permit=permit;
-                                    let result=tokio::select!{_=connection.cancel.cancelled()=>return,result=host.codex.call(&method,params)=>result};
-                                    if !host.settings.read().await.sharing || !connection.ready.load(Ordering::Acquire){return;}
+                                    // Finish accepted calls even if the peer disconnects, so local
+                                    // approval and turn bookkeeping reaches a consistent state.
+                                    let result=host.codex.call(&method,params).await;
+                                    if connection.cancel.is_cancelled() || !host.settings.read().await.sharing || !connection.ready.load(Ordering::Acquire){return;}
                                     let frame=match result{Ok(value)=>Control::Response{id:request_id,result:Some(value),error:None},Err(error)=>Control::Response{id:request_id,result:None,error:Some(error.to_string())}};
                                     let _=connection.outgoing.send(frame).await;
                                 });

@@ -1,88 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call, message, type Json, type RelayEvent } from "./api";
 import { referenceInput, type ComposerDraft } from "./mentions";
+import { applyEvent, mergeLive, mergeApprovals, pruneCache, retainedBytes, type ApprovalUpdate } from "./workbench-state";
+export { applyEvent } from "./workbench-state";
 
 const keyOf = (device: string, thread: string) => JSON.stringify([device, thread]);
 const selectionKeyOf = (device: string, archived: boolean) => JSON.stringify([device, archived]);
-export function applyEvent(previous: Json, event: Json, receivedAt = Date.now()): Json {
-  const method = event.method as string;
-  const p = event.params || {};
-  const next: Json = { ...previous, turns: [...(previous.turns || [])] };
-  if (method === "thread/started" && p.thread) return { ...next, ...p.thread };
-  if (method === "thread/status/changed") { next.status = p.status; return next; }
-  const turnId = p.turnId || p.turn?.id;
-  if (!turnId) return next;
-  let index = next.turns.findIndex((turn: Json) => turn.id === turnId);
-  if (index < 0) { index = next.turns.length; next.turns.push({ id: turnId, status: "inProgress", items: [] }); }
-  let turn: Json = { ...next.turns[index], items: [...(next.turns[index].items || [])] };
-  next.turns[index] = turn;
-  if (method === "turn/started" || method === "turn/completed") {
-    const timing = { ...turn.relayTiming };
-    if (method === "turn/started" && timing.startedAtMs == null) timing.startedAtMs = receivedAt;
-    if (method === "turn/completed" && timing.completedAtMs == null) timing.completedAtMs = receivedAt;
-    turn = { ...turn, ...p.turn, items: p.turn?.items?.length ? p.turn.items : turn.items, relayTiming: timing };
-    next.turns[index] = turn;
-    return next;
-  }
-  if (p.item && (method === "item/started" || method === "item/completed")) {
-    const itemIndex = turn.items.findIndex((item: Json) => item.id === p.item.id);
-    if (itemIndex >= 0) turn.items[itemIndex] = { ...turn.items[itemIndex], ...p.item };
-    else turn.items.push(p.item);
-  } else if ((method.endsWith("/delta") || method.endsWith("Delta")) && p.itemId) {
-    let itemIndex = turn.items.findIndex((item: Json) => item.id === p.itemId);
-    if (itemIndex < 0) {
-      itemIndex = turn.items.length;
-      const type = method.includes("commandExecution") ? "commandExecution" : method.includes("reasoning") ? "reasoning" : method.includes("/plan/") ? "plan" : "agentMessage";
-      turn.items.push({ id: p.itemId, type, text: "", summary: [], aggregatedOutput: "" });
-    }
-    const item = { ...turn.items[itemIndex] };
-    if (item.type === "agentMessage" && typeof p.phase === "string") item.phase = p.phase;
-    if (method.includes("commandExecution")) item.aggregatedOutput = (item.aggregatedOutput || "") + (p.delta || "");
-    else if (method.includes("reasoning")) item.text = (item.text || "") + (p.delta || "");
-    else item.text = (item.text || "") + (p.delta || "");
-    turn.items[itemIndex] = item;
-  } else if (method === "turn/diff/updated") turn.diff = p.diff;
-  return next;
-}
-
-function mergeLive(history: Json, live: Json | undefined, updates: Json[]): Json {
-  if (!live) return history;
-  const liveTurns = new Map<string, Json>((live.turns || []).map((turn: Json) => [turn.id, turn]));
-  const turns = (history.turns || []).map((turn: Json) => {
-    const timing = liveTurns.get(turn.id)?.relayTiming;
-    return timing ? { ...turn, relayTiming: { ...timing, ...turn.relayTiming } } : turn;
-  });
-  if (!updates.length) return { ...history, turns };
-  const touched = new Set(updates.map(event => event.params?.turnId || event.params?.turn?.id).filter(Boolean));
-  const longest = (a: unknown, b: unknown) => typeof a === "string" && typeof b === "string" ? (a.length >= b.length ? a : b) : b ?? a;
-  for (const current of live.turns || []) {
-    if (!touched.has(current.id)) continue;
-    const index = turns.findIndex((turn: Json) => turn.id === current.id);
-    if (index < 0) { turns.push(current); continue; }
-    const saved = turns[index];
-    const items = [...(saved.items || [])];
-    for (const item of current.items || []) {
-      const i = items.findIndex((saved: Json) => saved.id === item.id);
-      if (i < 0) { items.push(item); continue; }
-      const previous = items[i];
-      items[i] = {
-        ...previous, ...item, phase: item.phase ?? previous.phase, text: longest(previous.text, item.text),
-        aggregatedOutput: longest(previous.aggregatedOutput, item.aggregatedOutput),
-        status: previous.status === "completed" ? previous.status : item.status || previous.status,
-      };
-    }
-    const terminal = current.status !== "inProgress" ? current.status : saved.status;
-    turns[index] = {
-      ...saved, ...current, status: terminal, items,
-      startedAt: current.startedAt ?? saved.startedAt,
-      completedAt: current.completedAt ?? saved.completedAt,
-      durationMs: current.durationMs ?? saved.durationMs,
-      relayTiming: { ...saved.relayTiming, ...current.relayTiming },
-    };
-  }
-  return { ...history, turns };
-}
-
 export function useWorkbench(device: string, available: boolean, onError: (error: string) => void) {
   const [threads, setThreads] = useState<Json[]>([]);
   const [archivedView, setArchivedView] = useState(false);
@@ -91,7 +14,10 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const archiveFlags = useRef<Record<string, boolean>>({});
   const [listRevision, setListRevision] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
-  const [cache, setCache] = useState<Record<string, Json>>({});
+  const [cache, updateCache] = useState<Record<string, Json>>({});
+  const cached = useRef(cache); cached.current = cache;
+  const cacheAccess = useRef(new Map<string, number>());
+  const accessClock = useRef(0);
   const [sessions, setSessions] = useState<Record<string, { ready: boolean; resumeError?: string; historyError?: string }>>({});
   const resumed = useRef(new Set<string>());
   const newThreads = useRef<Record<string, Json>>({});
@@ -107,9 +33,14 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const [sending, setSending] = useState(false);
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [environmentRevision, setEnvironmentRevision] = useState(0);
+  const refreshTargets = useRef(new Set<string>());
   const active = useRef({ device, selected, available, archivedView });
   active.current = { device, selected, available, archivedView };
-  const events = useRef<Record<string, { sequence: number; log: { sequence: number; event: Json }[] }>>({});
+  const events = useRef<Record<string, { turns: Record<string, number> }>>({});
+  const approvalUpdates = useRef<Record<string, Map<string, ApprovalUpdate>>>({});
+  const pendingEvents = useRef<{ key: string; id: string; value: Json; receivedAt: number }[]>([]);
+  const pendingBytes = useRef(0);
+  const scheduled = useRef<{ frame: number; timer: number } | null>(null);
   const sequence = useRef(0);
   const selection = useRef<Record<string, string>>({});
   const listEpoch = useRef(0);
@@ -117,6 +48,65 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const processEpoch = useRef<Record<string, number>>({});
   const sendingRef = useRef(false);
   const onErrorRef = useRef(onError); onErrorRef.current = onError;
+
+  const setCache = useCallback((update: (previous: Record<string, Json>) => Record<string, Json>) => {
+    updateCache(previous => {
+      const next = update(previous);
+      const { device, selected } = active.current;
+      const protectedKey = selected ? keyOf(device, selected) : null;
+      for (const [key, thread] of Object.entries(next)) {
+        if (thread !== previous[key] || key === protectedKey) cacheAccess.current.set(key, ++accessClock.current);
+      }
+      return pruneCache(next, protectedKey, cacheAccess.current);
+    });
+  }, []);
+
+  const flushEvents = useCallback(() => {
+    if (scheduled.current) {
+      window.cancelAnimationFrame(scheduled.current.frame);
+      window.clearTimeout(scheduled.current.timer);
+      scheduled.current = null;
+    }
+    const batch = pendingEvents.current;
+    pendingEvents.current = [];
+    pendingBytes.current = 0;
+    if (!batch.length) return;
+    setCache(previous => {
+      const next = { ...previous };
+      for (const { key, id, value, receivedAt } of batch) {
+        if (!next[key] && key !== keyOf(active.current.device, active.current.selected || "")) continue;
+        next[key] = applyEvent(next[key] || { id, turns: [] }, value, receivedAt);
+      }
+      return next;
+    });
+  }, [setCache]);
+
+  useEffect(() => () => {
+    if (scheduled.current) {
+      window.cancelAnimationFrame(scheduled.current.frame);
+      window.clearTimeout(scheduled.current.timer);
+      scheduled.current = null;
+    }
+    pendingEvents.current = [];
+    pendingBytes.current = 0;
+  }, []);
+
+  useEffect(() => {
+    for (const key of cacheAccess.current.keys()) {
+      if (cache[key]) continue;
+      cacheAccess.current.delete(key);
+      delete events.current[key];
+      resumed.current.delete(key);
+    }
+    setSessions(previous => {
+      const entries = Object.entries(previous).filter(([key]) => cache[key]);
+      return entries.length === Object.keys(previous).length ? previous : Object.fromEntries(entries);
+    });
+  }, [cache]);
+
+  const recordApproval = useCallback((target: string, id: string, request?: Json) => {
+    approvalUpdates.current[target]?.set(String(id), { sequence: ++sequence.current, request });
+  }, []);
 
   const fetchList = useCallback(async (cursor: string | null = null, term = "") => {
     if (!active.current.available) return;
@@ -156,8 +146,14 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     if (restore) void open(restore);
     let stopped = false;
     const target = device;
+    const refresh = refreshTargets.current.delete(target);
+    const pendingStartedAt = sequence.current;
+    const generation = processEpoch.current[target] || 0;
+    const current = () => !stopped && generation === (processEpoch.current[target] || 0);
+    const pendingUpdates = new Map<string, ApprovalUpdate>();
+    approvalUpdates.current[target] = pendingUpdates;
     void Promise.allSettled([
-      call(target, "relay/environment").then(result => { if (!stopped) setEnvironment(result); }),
+      call(target, "relay/environment", { refresh }).then(result => { if (current()) setEnvironment(result); }),
       (async () => {
         let cursor: string | null = null;
         const all: Json[] = [];
@@ -165,17 +161,19 @@ export function useWorkbench(device: string, available: boolean, onError: (error
           const result: Json = await call(target, "model/list", { limit: 100, cursor });
           all.push(...(result.data || []));
           cursor = result.nextCursor || null;
-        } while (cursor && all.length < 1000 && !stopped);
-        if (!stopped) setModels(all);
+        } while (cursor && all.length < 1000 && current());
+        if (current()) setModels(all);
       })(),
-      call(target, "relay/pending").then(result => { if (!stopped) setRequests(previous => ({ ...previous, [target]: result.requests || [] })); }),
+      call(target, "relay/pending").then(result => {
+        if (current()) setRequests(previous => ({ ...previous, [target]: mergeApprovals(result.requests || [], pendingUpdates, pendingStartedAt) }));
+      }).finally(() => { if (approvalUpdates.current[target] === pendingUpdates) delete approvalUpdates.current[target]; }),
     ]).then(results => {
-      if (!stopped) {
+      if (current()) {
         const failure = results.find(result => result.status === "rejected");
         if (failure?.status === "rejected") onErrorRef.current(message(failure.reason));
       }
     });
-    return () => { stopped = true; };
+    return () => { stopped = true; if (approvalUpdates.current[target] === pendingUpdates) delete approvalUpdates.current[target]; };
   }, [device, available, environmentRevision]);
 
   useEffect(() => {
@@ -187,6 +185,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const open = useCallback(async (id: string) => {
     const target = active.current.device;
     if (!active.current.available) return;
+    flushEvents();
     const key = keyOf(target, id);
     if (archiveMutations.current.has(key)) return;
     const archived = archiveFlags.current[key] ?? active.current.archivedView;
@@ -244,11 +243,12 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         }
       }
       if (epoch !== openEpoch.current || target !== active.current.device) return;
-      const updates = (events.current[key]?.log || []).filter(entry => entry.sequence > startedAt).map(entry => entry.event);
+      flushEvents();
+      const touched = new Set(Object.entries(events.current[key]?.turns || {}).filter(([, updated]) => updated > startedAt).map(([id]) => id));
       // Merge live snapshots; replaying deltas onto a fetched snapshot can duplicate text.
       setCache(previous => {
         const history = { ...previous[key], ...thread, turns: historyError ? previous[key]?.turns || thread.turns || [] : thread.turns || [] };
-        return { ...previous, [key]: { ...mergeLive(history, previous[key], updates), interrupted: false, relayArchived: archived } };
+        return { ...previous, [key]: { ...mergeLive(history, previous[key], touched), interrupted: false, relayArchived: archived } };
       });
       if (result && !archived) {
         resumed.current.add(key);
@@ -262,7 +262,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         setSessions(previous => ({ ...previous, [key]: { ready: false, ...(archived ? { historyError: message(error) } : { resumeError: message(error) }) } }));
       }
     } finally { if (epoch === openEpoch.current) setOpening(false); }
-  }, []);
+  }, [flushEvents, setCache]);
 
   const showArchived = useCallback((archived: boolean) => {
     if (archived === active.current.archivedView) return;
@@ -305,6 +305,8 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     const value = event.message;
     const p = value.params || {};
     if (value.method === "relay/codexExited") {
+      flushEvents();
+      delete approvalUpdates.current[target];
       processEpoch.current[target] = (processEpoch.current[target] || 0) + 1;
       const endedAt = Date.now();
       const discarded = new Set<string>();
@@ -328,10 +330,12 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       return;
     }
     if (value.id !== undefined && value.method) {
+      recordApproval(target, String(value.id), value);
       setRequests(previous => ({ ...previous, [target]: [...(previous[target] || []).filter(r => r.id !== value.id), value] }));
       return;
     }
     if (value.method === "relay/approvalResolved" || value.method === "serverRequest/resolved") {
+      recordApproval(target, String(p.id ?? p.requestId));
       setRequests(previous => ({ ...previous, [target]: (previous[target] || []).filter(r => r.id !== (p.id || p.requestId)) }));
     }
     const id = p.threadId || p.thread?.id;
@@ -343,17 +347,25 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     }
     if (value.method === "turn/started" && newThreads.current[key]) newThreads.current[key].relayHistoryPending = false;
     if (value.method === "thread/started" && p.thread && newThreads.current[key]) newThreads.current[key] = { ...newThreads.current[key], ...p.thread };
-    const entry = events.current[key] || { sequence: 0, log: [] };
-    const currentSequence = ++sequence.current;
-    const receivedAt = Date.now();
-    entry.log.push({ sequence: currentSequence, event: value }); entry.sequence = currentSequence;
-    if (entry.log.length > 4096) entry.log.splice(0, 1024);
-    events.current[key] = entry;
-    setCache(previous => ({ ...previous, [key]: applyEvent(previous[key] || { id, turns: [] }, value, receivedAt) }));
     if (target === active.current.device && !active.current.archivedView && archiveFlags.current[key] !== true && value.method === "thread/started" && p.thread) {
       setThreads(previous => [p.thread, ...previous.filter(t => t.id !== p.thread.id)]);
     }
-  }, [applyArchiveState]);
+    if (!cached.current[key] && key !== keyOf(active.current.device, active.current.selected || "")) return;
+    const entry = events.current[key] ||= { turns: {} };
+    const turnId = p.turnId || p.turn?.id;
+    if (turnId) entry.turns[turnId] = ++sequence.current;
+    const turns = Object.entries(entry.turns);
+    if (turns.length > 512) entry.turns = Object.fromEntries(turns.sort((a, b) => b[1] - a[1]).slice(0, 512));
+    pendingEvents.current.push({ key, id, value, receivedAt: Date.now() });
+    pendingBytes.current += retainedBytes(value);
+    if (pendingEvents.current.length >= 512 || pendingBytes.current >= 2 * 1024 * 1024) flushEvents();
+    else if (!scheduled.current) {
+      scheduled.current = {
+        frame: window.requestAnimationFrame(flushEvents),
+        timer: window.setTimeout(flushEvents, 100),
+      };
+    }
+  }, [applyArchiveState, flushEvents, recordApproval, setCache]);
 
   const archiveReason = (thread: Json): string => {
     const key = keyOf(device, thread.id);
@@ -423,11 +435,13 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     if (!id || !available || !resumed.current.has(keyOf(target, id)) || archiveFlags.current[keyOf(target, id)] === true || archiveMutations.current.has(keyOf(target, id)) || !draft.text.trim() || sendingRef.current) return false;
     sendingRef.current = true; setSending(true);
     const submittedAt = Date.now();
+    const generation = processEpoch.current[target] || 0;
     try {
       const result = await call(target, "turn/start", {
         threadId: id, input: referenceInput(draft),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       });
+      if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，请重新读取会话确认提交状态");
       const key = keyOf(target, id);
       if (result.turn && newThreads.current[key]) newThreads.current[key].relayHistoryPending = false;
       if (result.turn) setCache(previous => {
@@ -459,23 +473,28 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       throw new Error("请先成功接续当前会话，再处理审批");
     }
     await call(target, "relay/approval", { id, result });
+    recordApproval(target, id);
     setRequests(previous => ({ ...previous, [target]: (previous[target] || []).filter(request => request.id !== id) }));
   };
   const older = async () => {
-    if (!selected || !olderCursor || opening) return;
+    if (!selected || !olderCursor || opening || !available) return;
     const target = device, id = selected, key = keyOf(device, selected), cursor = olderCursor;
+    const epoch = ++openEpoch.current;
+    const generation = processEpoch.current[target] || 0;
+    const current = () => epoch === openEpoch.current && generation === (processEpoch.current[target] || 0) && active.current.available && active.current.device === target && active.current.selected === id;
     setOpening(true);
     try {
       const page = await call(target, "thread/turns/list", { threadId: id, cursor, limit: 20, sortDirection: "desc", itemsView: "full" });
-      if (active.current.device !== target || active.current.selected !== id) return;
+      if (!current()) return;
+      if (!Array.isArray(page.data)) throw new Error("Codex 返回了无效的回合列表");
       setOlderCursor(page.nextCursor || null);
       setCache(previous => {
         const thread = previous[key]; if (!thread) return previous;
         const old = [...(page.data || [])].reverse().filter((turn: Json) => !thread.turns.some((t: Json) => t.id === turn.id));
         return { ...previous, [key]: { ...thread, turns: [...old, ...thread.turns] } };
       });
-    } catch (error) { onErrorRef.current(message(error)); }
-    finally { if (active.current.device === target && active.current.selected === id) setOpening(false); }
+    } catch (error) { if (current()) onErrorRef.current(message(error)); }
+    finally { if (current()) setOpening(false); }
   };
   return {
     threads, selected, thread, models, environment, permissions, requests: requests[device] || [],
@@ -483,7 +502,8 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     isArchiveBusy: (id: string) => !!archiveBusy[keyOf(device, id)],
     search, setSearch, nextCursor, loading, opening, sending, activeTurn, olderCursor,
     ready, resumeError: session?.resumeError, historyError: session?.historyError,
-    open, event, create, send, stop, resolve, older, refresh: () => setEnvironmentRevision(previous => previous + 1),
+    open, event, create, send, stop, resolve, older,
+    refresh: () => { refreshTargets.current.add(active.current.device); setEnvironmentRevision(previous => previous + 1); },
     loadMore: () => fetchList(nextCursor, search.trim()),
   };
 }

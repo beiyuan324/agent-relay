@@ -1,19 +1,25 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde_json::{json, Value};
-use std::{collections::{HashMap, HashSet}, path::Path, sync::{Arc, Mutex as StdMutex}, time::Duration};
-use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{ChildStdin, Command}, sync::{broadcast, oneshot, Mutex, RwLock}};
+use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::{Arc, Mutex as StdMutex}, time::Duration};
+use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::Command, sync::{broadcast, mpsc, oneshot, Mutex}};
 use tokio_util::sync::CancellationToken;
 pub use crate::discovery::discover;
 
 type Pending = StdMutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>;
 pub struct Codex {
-    path: RwLock<String>,
+    installation: Mutex<Installation>,
     client: Mutex<Option<Arc<Client>>>,
     pub events: broadcast::Sender<Value>,
 }
+struct Installation { configured: String, executable: Option<PathBuf> }
+struct WriteJob { data: Vec<u8>, done: oneshot::Sender<Result<(), String>> }
+struct PendingRequest<'a> { pending: &'a Pending, id: String }
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) { lock(self.pending).remove(&self.id); }
+}
 struct Approval { rpc_id: Value, message: Value }
 struct Client {
-    writer: Mutex<ChildStdin>,
+    writer: mpsc::Sender<WriteJob>,
     pending: Pending,
     approvals: StdMutex<HashMap<String, Approval>>,
     active: StdMutex<HashMap<String, String>>,
@@ -25,31 +31,74 @@ struct Client {
 }
 fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
 
+async fn write_loop<W: tokio::io::AsyncWrite + Unpin>(mut stdin: W, mut writes: mpsc::Receiver<WriteJob>, writer_stop: CancellationToken) {
+    loop {
+        let job = tokio::select! {
+            _ = writer_stop.cancelled() => break,
+            job = writes.recv() => { let Some(job) = job else { break }; job },
+        };
+        // A caller can stop waiting, but a started JSON line is always written in full.
+        let result = tokio::select! {
+            _ = writer_stop.cancelled() => break,
+            result = tokio::time::timeout(Duration::from_secs(15), stdin.write_all(&job.data)) => result,
+        };
+        let result = match result {
+            Ok(Ok(())) => Ok(()),
+            _ => Err("Codex 写入失败或超时；请刷新会话确认提交结果".to_string()),
+        };
+        let failed = result.is_err();
+        let _ = job.done.send(result);
+        if failed { writer_stop.cancel(); break; }
+    }
+}
+
 impl Codex {
     pub fn new(path: String) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
-        Arc::new(Self { path: RwLock::new(path), client: Mutex::new(None), events })
+        Arc::new(Self { installation: Mutex::new(Installation { configured: path, executable: None }), client: Mutex::new(None), events })
     }
     pub async fn set_path(&self, path: String) {
-        *self.path.write().await = path;
-        if let Some(client) = self.client.lock().await.take() { client.ended.cancel(); }
+        let mut slot = self.client.lock().await;
+        *self.installation.lock().await = Installation { configured: path, executable: None };
+        if let Some(client) = slot.take() { client.ended.cancel(); }
     }
     pub async fn shutdown(&self) {
         if let Some(client) = self.client.lock().await.take() { client.ended.cancel(); }
     }
+    async fn executable(&self) -> Result<PathBuf> {
+        let mut installation = self.installation.lock().await;
+        if let Some(path) = &installation.executable { return Ok(path.clone()); }
+        let configured = installation.configured.clone();
+        let path = tokio::task::spawn_blocking(move || discover(&configured)).await??;
+        installation.executable = Some(path.clone());
+        Ok(path)
+    }
     async fn get(&self) -> Result<Arc<Client>> {
+        let result = self.get_inner().await;
+        if result.is_err() { self.installation.lock().await.executable = None; }
+        result
+    }
+    async fn get_inner(&self) -> Result<Arc<Client>> {
         let mut slot = self.client.lock().await;
         if let Some(client) = slot.as_ref().filter(|c| !c.ended.is_cancelled()) { return Ok(client.clone()); }
-        let executable = discover(&self.path.read().await)?;
+        let executable = self.executable().await?;
         let mut cmd = if executable.extension().is_some_and(|v| v.to_string_lossy().eq_ignore_ascii_case("js")) {
-            let mut cmd = Command::new(crate::discovery::node_executable()?); cmd.arg(&executable); cmd
+            let mut cmd = Command::new(tokio::task::spawn_blocking(crate::discovery::node_executable).await??); cmd.arg(&executable); cmd
         } else { Command::new(&executable) };
         cmd.arg("app-server").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
         #[cfg(windows)] cmd.creation_flags(0x08000000);
-        let mut child = cmd.spawn().context("无法启动 Codex，请检查可执行文件和本机登录配置")?;
-        let writer = child.stdin.take().ok_or_else(|| anyhow!("无法连接 Codex stdin"))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => { self.installation.lock().await.executable = None; return Err(error).context("无法启动 Codex，请检查可执行文件和本机登录配置"); }
+        };
+        let stdin = child.stdin.take().ok_or_else(|| anyhow!("无法连接 Codex stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("无法连接 Codex stdout"))?;
-        let client = Arc::new(Client { writer:Mutex::new(writer),pending:StdMutex::new(HashMap::new()),approvals:StdMutex::new(HashMap::new()),active:StdMutex::new(HashMap::new()),unmaterialized:StdMutex::new(HashMap::new()),archived:StdMutex::new(HashSet::new()),resume_lock:Mutex::new(()),start_locks:StdMutex::new(HashMap::new()),ended:CancellationToken::new() });
+        let (writer, writes) = mpsc::channel::<WriteJob>(128);
+        let client = Arc::new(Client { writer,pending:StdMutex::new(HashMap::new()),approvals:StdMutex::new(HashMap::new()),active:StdMutex::new(HashMap::new()),unmaterialized:StdMutex::new(HashMap::new()),archived:StdMutex::new(HashSet::new()),resume_lock:Mutex::new(()),start_locks:StdMutex::new(HashMap::new()),ended:CancellationToken::new() });
+        // Initialization cancellation must terminate the process before it is published.
+        let startup = client.ended.clone().drop_guard();
+        let writer_stop = client.ended.clone();
+        tokio::spawn(write_loop(stdin, writes, writer_stop));
         let reader_client = client.clone();
         let events = self.events.clone();
         tokio::spawn(async move {
@@ -134,11 +183,13 @@ impl Codex {
         if let Err(error) = initialized { client.ended.cancel(); bail!("Codex 协议初始化失败：{error}"); }
         client.write(json!({"method":"initialized","params":{}})).await?;
         *slot = Some(client.clone());
+        startup.disarm();
         Ok(client)
     }
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         if method == "relay/environment" {
-            let path = discover(&self.path.read().await);
+            if params["refresh"] == true { self.installation.lock().await.executable = None; }
+            let path = self.executable().await;
             return match path {
                 Ok(path) => {
                     let client = self.get().await?;
@@ -302,15 +353,18 @@ impl Client {
     async fn write(&self, value: Value) -> Result<()> {
         ensure!(!self.ended.is_cancelled(), "Codex 进程连接已结束");
         let mut data = serde_json::to_vec(&value)?; data.push(b'\n');
-        self.writer.lock().await.write_all(&data).await.context("Codex 写入失败")
+        let (done, result) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(15), self.writer.send(WriteJob { data, done })).await
+            .context("Codex 写入队列等待超时")?.map_err(|_|anyhow!("Codex 写入通道已关闭"))?;
+        result.await.map_err(|_|anyhow!("Codex 写入通道已关闭"))?.map_err(|error|anyhow!(error))
     }
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         lock(&self.pending).insert(id.clone(),tx);
-        if let Err(error) = self.write(json!({"id":id,"method":method,"params":params})).await { lock(&self.pending).remove(&id); return Err(error); }
+        let _pending = PendingRequest { pending: &self.pending, id: id.clone() };
+        self.write(json!({"id":id,"method":method,"params":params})).await?;
         let result = tokio::time::timeout(Duration::from_secs(90),rx).await;
-        lock(&self.pending).remove(&id);
         match result {
             Ok(Ok(result)) => result.map_err(|e|anyhow!(e)),
             Ok(Err(_)) => bail!("Codex 连接已断开；请刷新会话确认提交结果"),
@@ -338,6 +392,95 @@ impl Client {
             }
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    fn client(writer: mpsc::Sender<WriteJob>) -> Arc<Client> {
+        Arc::new(Client {
+            writer, pending: StdMutex::new(HashMap::new()), approvals: StdMutex::new(HashMap::new()),
+            active: StdMutex::new(HashMap::new()), unmaterialized: StdMutex::new(HashMap::new()),
+            archived: StdMutex::new(HashSet::new()), resume_lock: Mutex::new(()),
+            start_locks: StdMutex::new(HashMap::new()), ended: CancellationToken::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_removes_pending_entry() {
+        let (writer, mut writes) = mpsc::channel(4);
+        let client = client(writer);
+        let request_client = client.clone();
+        let task = tokio::spawn(async move { request_client.request("thread/read", json!({})).await });
+        let _job = writes.recv().await.unwrap();
+        assert_eq!(lock(&client.pending).len(), 1);
+        task.abort();
+        let _ = task.await;
+        assert!(lock(&client.pending).is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_caller_does_not_truncate_a_started_json_line() {
+        let (stdin, mut stdout) = tokio::io::duplex(16);
+        let (writer, writes) = mpsc::channel(4);
+        let stop = CancellationToken::new();
+        let actor = tokio::spawn(write_loop(stdin, writes, stop));
+        let first = serde_json::to_string(&json!({"text":"x".repeat(2048)})).unwrap() + "\n";
+        let (done, result) = oneshot::channel();
+        writer.send(WriteJob { data: first.as_bytes().to_vec(), done }).await.unwrap();
+        let mut prefix = [0u8; 8];
+        stdout.read_exact(&mut prefix).await.unwrap();
+        drop(result);
+        let (done, result) = oneshot::channel();
+        writer.send(WriteJob { data: b"{\"next\":true}\n".to_vec(), done }).await.unwrap();
+        drop(writer);
+        let mut remainder = String::new();
+        stdout.read_to_string(&mut remainder).await.unwrap();
+        let full = String::from_utf8(prefix.to_vec()).unwrap() + &remainder;
+        let lines: Vec<Value> = full.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["text"].as_str().unwrap().len(), 2048);
+        assert_eq!(lines[1]["next"], true);
+        assert!(result.await.unwrap().is_ok());
+        actor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_failure_terminates_the_protocol_stream() {
+        let (stdin, stdout) = tokio::io::duplex(16);
+        drop(stdout);
+        let (writer, writes) = mpsc::channel(1);
+        let stop = CancellationToken::new();
+        let actor = tokio::spawn(write_loop(stdin, writes, stop.clone()));
+        let (done, result) = oneshot::channel();
+        writer.send(WriteJob { data: b"{}\n".to_vec(), done }).await.unwrap();
+        assert!(result.await.unwrap().is_err());
+        actor.await.unwrap();
+        assert!(stop.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn invalid_configured_executable_is_reported_without_starting_a_process() {
+        let codex = Codex::new("not-an-absolute-executable".into());
+        let environment = codex.call("relay/environment", json!({})).await.unwrap();
+        assert_eq!(environment["installed"], false);
+        assert!(codex.client.lock().await.is_none());
+        assert!(codex.installation.lock().await.executable.is_none());
+    }
+
+    #[tokio::test]
+    async fn ended_writer_drops_queued_write_receipts() {
+        let (stdin, _stdout) = tokio::io::duplex(16);
+        let (writer, writes) = mpsc::channel(1);
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let (done, result) = oneshot::channel();
+        writer.send(WriteJob { data: vec![0; 4096], done }).await.unwrap();
+        tokio::spawn(write_loop(stdin, writes, stop)).await.unwrap();
+        assert!(result.await.is_err());
     }
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AlertCircle, Check, ChevronDown, ChevronRight, FileCode2, ListChecks, Loader2, ShieldCheck, Terminal, Wrench } from "lucide-react";
@@ -28,7 +28,7 @@ function UserText({ part }: { part: Json }) {
   if (cursor < bytes.length) content.push(decoder.decode(bytes.subarray(cursor)));
   return <span>{content}</span>;
 }
-function Item({ item }: { item: Json }) {
+const Item = memo(function Item({ item }: { item: Json }) {
   switch (item.type) {
     case "userMessage": {
       const content: Json[] = item.content || [];
@@ -61,7 +61,7 @@ function Item({ item }: { item: Json }) {
     default:
       return <details className="tool-card"><summary><Wrench size={14} /><span className="tool-title">{item.type || "执行事件"}</span></summary><div className="tool-body"><pre>{output(item)}</pre></div></details>;
   }
-}
+});
 function finiteMilliseconds(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
@@ -87,7 +87,7 @@ function formatElapsed(ms: number): string {
   const total = Math.floor(ms / 1000), hours = Math.floor(total / 3600), minutes = Math.floor(total / 60) % 60, seconds = total % 60;
   return [hours ? `${hours}h` : "", minutes ? `${minutes}m` : "", seconds || (!hours && !minutes) ? `${seconds}s` : ""].filter(Boolean).join(" ");
 }
-function Turn({ turn, running }: { turn: Json; running: boolean }) {
+const Turn = memo(function Turn({ turn, running }: { turn: Json; running: boolean }) {
   const active = running && turn.status === "inProgress";
   const [expanded, setExpanded] = useState(active);
   const [now, setNow] = useState(Date.now);
@@ -118,7 +118,7 @@ function Turn({ turn, running }: { turn: Json; running: boolean }) {
     {users.map(item => <Item key={item.id} item={item} />)}
     {process.length > 0 ? <details className="turn-process" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
       <summary className="turn-process-summary" title={`${timingHint}；点击展开或收起处理过程`}><span>{active && <Loader2 size={14} className="spin" />}{label}</span><ChevronRight size={14} className="turn-process-chevron" /></summary>
-      <div className="turn-process-body">{process.map(item => <Item key={item.id} item={item} />)}</div>
+      {expanded && <div className="turn-process-body">{process.map(item => <Item key={item.id} item={item} />)}</div>}
     </details> : <div className="turn-duration" title={timingHint}>{active && <Loader2 size={14} className="spin" />}{label}</div>}
     {results.map(item => <Item key={item.id} item={item} />)}
     {turn.status === "completed" && !results.length && !!process.length && <div className="turn-note">此回合没有最终答复，可展开处理过程查看。</div>}
@@ -126,7 +126,7 @@ function Turn({ turn, running }: { turn: Json; running: boolean }) {
     {turn.status === "failed" && !turn.error && <div className="inline-error"><AlertCircle size={15} />此回合执行失败，可展开处理过程查看详情。</div>}
     {turn.status === "interrupted" && <div className="turn-note">此回合已停止或连接已结束。</div>}
   </section>;
-}
+});
 export function Transcript({ thread, running, older, hasOlder, loading }: { thread: Json; running: boolean; older: () => void; hasOlder: boolean; loading: boolean }) {
   const bottom = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -138,7 +138,7 @@ export function Transcript({ thread, running, older, hasOlder, loading }: { thre
   return <div className="transcript" ref={scroll} onScroll={() => { const el = scroll.current; if (el) follow.current = el.scrollHeight - el.clientHeight - el.scrollTop < 160; }}>
     <div className="transcript-inner">
       {hasOlder && <button className="load-older" disabled={loading} onClick={() => { follow.current = false; older(); }}>{loading ? "正在读取…" : "加载更早的回合"}</button>}
-      {(thread.turns || []).map((turn: Json) => <Turn key={`${thread.id}:${turn.id}`} turn={turn} running={running} />)}
+      {(thread.turns || []).map((turn: Json) => <Turn key={`${thread.id}:${turn.id}`} turn={turn} running={running && turn.status === "inProgress"} />)}
       {running && !(thread.turns || []).some((turn: Json) => turn.status === "inProgress") && <div className="working-indicator"><span className="pulse-dot" />Codex 正在处理</div>}
       {thread.interrupted && <div className="inline-error"><AlertCircle size={15} />进程连接已结束，请刷新会话确认最终状态。</div>}
       <div ref={bottom} />

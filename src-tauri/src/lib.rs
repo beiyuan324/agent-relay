@@ -11,6 +11,7 @@ struct Desktop {
     host: Arc<Host>,
     path: PathBuf,
     mutation: Mutex<()>,
+    saved: Mutex<Option<Vec<u8>>>,
     diagnostics: Mutex<VecDeque<String>>,
 }
 #[derive(Serialize)]
@@ -24,13 +25,21 @@ struct Snapshot {
 }
 impl Desktop {
     async fn save(&self)->Result<()> {
+        let mut saved=self.saved.lock().await;
         let settings=self.host.snapshot().await;
-        let parent=self.path.parent().ok_or_else(||anyhow!("设置目录无效"))?;
-        std::fs::create_dir_all(parent)?;
-        let mut file=tempfile::NamedTempFile::new_in(parent)?;
-        file.write_all(&serde_json::to_vec_pretty(&settings)?)?;
-        file.as_file().sync_all()?;
-        file.persist(&self.path).map_err(|_|anyhow!("无法原子保存设置，请检查目录权限"))?;
+        let bytes=serde_json::to_vec_pretty(&settings)?;
+        if saved.as_ref()==Some(&bytes){return Ok(());}
+        let path=self.path.clone();
+        let bytes=tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+            let parent=path.parent().ok_or_else(||anyhow!("设置目录无效"))?;
+            std::fs::create_dir_all(parent)?;
+            let mut file=tempfile::NamedTempFile::new_in(parent)?;
+            file.write_all(&bytes)?;
+            file.as_file().sync_all()?;
+            file.persist(&path).map_err(|_|anyhow!("无法原子保存设置，请检查目录权限"))?;
+            Ok(bytes)
+        }).await??;
+        *saved=Some(bytes);
         Ok(())
     }
     async fn snapshot(&self)->Snapshot {
@@ -139,24 +148,31 @@ pub fn run() {
             };
             let devices=settings.devices.clone();
             let host=Host::new(settings);
-            let state=Arc::new(Desktop{host:host.clone(),path,mutation:Mutex::new(()),diagnostics:Mutex::new(VecDeque::new())});
+            let state=Arc::new(Desktop{host:host.clone(),path,mutation:Mutex::new(()),saved:Mutex::new(None),diagnostics:Mutex::new(VecDeque::new())});
             app.manage(state.clone());
             let handle=app.handle().clone();
             tauri::async_runtime::block_on(async move {
                 // Subscribe before listeners or reconnection tasks can emit state.
                 let mut events=host.events.subscribe();
+                let (persist,mut saves)=tokio::sync::mpsc::channel::<()>(1);
+                let save_state=state.clone();let save_handle=handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    while saves.recv().await.is_some() {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        while saves.try_recv().is_ok() {}
+                        let _guard=save_state.mutation.lock().await;
+                        if save_state.save().await.is_err(){
+                            let message="无法保存设备状态，请检查设置目录权限".to_string();
+                            save_state.diagnostic(message.clone()).await;
+                            let _=save_handle.emit("relay:event",AppEvent::Diagnostic{message});
+                        }
+                    }
+                });
                 let event_state=state.clone();let event_handle=handle.clone();
                 tauri::async_runtime::spawn(async move {
                     loop {
                         match events.recv().await {
-                            Ok(AppEvent::Persist)=>{
-                                let _guard=event_state.mutation.lock().await;
-                                if event_state.save().await.is_err(){
-                                    let message="无法保存设备状态，请检查设置目录权限".to_string();
-                                    event_state.diagnostic(message.clone()).await;
-                                    let _=event_handle.emit("relay:event",AppEvent::Diagnostic{message});
-                                }
-                            },
+                            Ok(AppEvent::Persist)=>{let _=persist.try_send(());},
                             Ok(event)=>{
                                 if let AppEvent::Diagnostic{message}=&event{event_state.diagnostic(message.clone()).await;}
                                 let _=event_handle.emit("relay:event",event);
@@ -186,7 +202,54 @@ pub fn run() {
         .expect("Relay 无法启动")
         .run(|app,event|{
             if let tauri::RunEvent::Exit=event {
-                if let Some(state)=app.try_state::<Arc<Desktop>>(){tauri::async_runtime::block_on(state.host.shutdown());}
+                if let Some(state)=app.try_state::<Arc<Desktop>>(){
+                    tauri::async_runtime::block_on(async {
+                        state.host.shutdown().await;
+                        let _guard=state.mutation.lock().await;
+                        if let Err(error)=state.save().await {eprintln!("退出时保存设置失败：{error}");}
+                    });
+                }
             }
         });
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn desktop(path: PathBuf) -> Desktop {
+        Desktop { host: Host::new(Settings::default()), path, mutation: Mutex::new(()),
+            saved: Mutex::new(None), diagnostics: Mutex::new(VecDeque::new()) }
+    }
+
+    #[tokio::test]
+    async fn settings_save_is_atomic_and_skips_identical_snapshots() {
+        let directory=tempfile::tempdir().unwrap();
+        let state=desktop(directory.path().join("settings.json"));
+        state.save().await.unwrap();
+        let initial=std::fs::read(&state.path).unwrap();
+        let timestamp=std::time::UNIX_EPOCH+std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options().write(true).open(&state.path).unwrap().set_modified(timestamp).unwrap();
+        let before=std::fs::metadata(&state.path).unwrap().modified().unwrap();
+        state.save().await.unwrap();
+        assert_eq!(std::fs::metadata(&state.path).unwrap().modified().unwrap(),before);
+        assert_eq!(std::fs::read(&state.path).unwrap(),initial);
+        state.host.update_settings(String::new(),String::new(),"dark".into(),"Updated device".into()).await.unwrap();
+        state.save().await.unwrap();
+        let settings:Settings=serde_json::from_slice(&std::fs::read(&state.path).unwrap()).unwrap();
+        assert_eq!(settings.identity.name,"Updated device");
+        assert_eq!(settings.theme,"dark");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(),1);
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_can_be_retried_without_changing_settings() {
+        let directory=tempfile::tempdir().unwrap();
+        let state=desktop(directory.path().join("settings.json"));
+        std::fs::create_dir(&state.path).unwrap();
+        assert!(state.save().await.is_err());
+        assert!(state.saved.lock().await.is_none());
+        std::fs::remove_dir(&state.path).unwrap();
+        state.save().await.unwrap();
+        assert!(serde_json::from_slice::<Settings>(&std::fs::read(&state.path).unwrap()).is_ok());
+    }
 }
