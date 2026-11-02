@@ -77,7 +77,7 @@ jobs:
           uploadUpdaterSignatures: true
           args: --bundles nsis -- --locked
 
-      - name: Attach installer checksums
+      - name: Finalize updater manifest and checksums
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,5 +89,20 @@ jobs:
             "$relayHash  $($_.Name)"
           }
           Set-Content -LiteralPath target/release/bundle/nsis/SHA256SUMS.txt -Value $relayHashes -Encoding utf8NoBOM
-          gh release upload $env:RELAY_RELEASE_TAG target/release/bundle/nsis/SHA256SUMS.txt --clobber
-          if ($LASTEXITCODE -ne 0) { throw "Failed to upload checksums" }
+          gh release download $env:RELAY_RELEASE_TAG --pattern latest.json --dir target/release/bundle/nsis --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to download updater manifest" }
+          $relayManifestPath = "target/release/bundle/nsis/latest.json"
+          $relayManifest = Get-Content -LiteralPath $relayManifestPath -Raw | ConvertFrom-Json
+          $relayNotesPath = "docs/releases/$env:RELAY_RELEASE_TAG.md"
+          if (Test-Path -LiteralPath $relayNotesPath) {
+            $relayManifest.notes = Get-Content -LiteralPath $relayNotesPath -Raw
+          }
+          $relayReleaseBase = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/download/$env:RELAY_RELEASE_TAG"
+          foreach ($relayPlatform in $relayManifest.platforms.PSObject.Properties) {
+            if ($relayPlatform.Name -like "windows-x86_64*") {
+              $relayPlatform.Value.url = "$relayReleaseBase/$($relayInstallers[0].Name)"
+            }
+          }
+          Set-Content -LiteralPath $relayManifestPath -Value ($relayManifest | ConvertTo-Json -Depth 12) -Encoding utf8NoBOM
+          gh release upload $env:RELAY_RELEASE_TAG $relayManifestPath target/release/bundle/nsis/SHA256SUMS.txt --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload release metadata" }
