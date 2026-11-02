@@ -107,7 +107,7 @@ impl Host {
             }.await;
             match result {
                 Ok(transport)=>{backoff=1;self.clone().session(peer.clone(),transport,true).await;}
-                Err(_)=>self.update(&peer,"offline",Some("无法连接执行电脑，请检查地址、共享应用和网络".into())).await,
+                Err(error)=>self.update(&peer,"offline",Some(error.to_string())).await,
             }
             tokio::select!{_=peer.cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(backoff))=>{}}
             backoff=(backoff*2).min(30);
@@ -117,30 +117,51 @@ impl Host {
         let mut backoff=1;
         loop {
             if peer.cancel.is_cancelled(){break;}
-            self.update(&peer,"waiting",None).await;
+            self.update(&peer,"connecting",None).await;
             let config=peer.config.read().await.clone();
             let name=self.settings.read().await.identity.name.clone();
             let (incoming,mut rx)=mpsc::channel::<Transport>(4);
             let host=self.clone();let session_peer=peer.clone();
             let accept=tokio::spawn(async move {while let Some(transport)=rx.recv().await {let host=host.clone();let peer=session_peer.clone();tokio::spawn(async move{host.session(peer,transport,false).await;});}});
-            let result=tunnel::register(&config.endpoint,&peer.code,&name,incoming,peer.cancel.child_token()).await;
+            let mut registered=false;
+            let result={
+                let ready=async {registered=true;self.update(&peer,"waiting",None).await;};
+                let register=tunnel::register(&config.endpoint,&peer.code,&name,incoming,ready,peer.cancel.child_token());
+                tokio::pin!(register);
+                tokio::select! {
+                    _=peer.cancel.cancelled()=>{accept.abort();return;},
+                    result=&mut register=>result,
+                }
+            };
             accept.abort();
             if peer.cancel.is_cancelled(){break;}
             if result.as_ref().is_err_and(|e|e.to_string()=="replaced") {self.update(&peer,"replaced",Some("此配对已被另一实例注册，请手动重新连接".into())).await;break;}
-            if result.is_ok(){backoff=1;}
-            self.update(&peer,"offline",Some("中继连接已断开，正在等待重连".into())).await;
+            if registered{backoff=1;}
+            let message=result.err().map(|error|error.to_string()).unwrap_or_else(||"中继连接已断开，正在等待重连".into());
+            self.update(&peer,"offline",Some(message)).await;
             tokio::select!{_=peer.cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(backoff))=>{}}
             backoff=(backoff*2).min(30);
         }
     }
     async fn update(&self,peer:&Peer,state:&str,error:Option<String>) {
-        let mut view=peer.view.write().await;view.state=state.into();view.error=error;let _=self.events.send(AppEvent::Device{device:view.clone()});
+        let mut view=peer.view.write().await;
+        let changed=view.state!=state || view.error!=error;
+        view.state=state.into();view.error=error;
+        let diagnostic=if changed{view.error.as_ref().map(|error|format!("配对 {}：{error}",view.id))}else{None};
+        let _=self.events.send(AppEvent::Device{device:view.clone()});
+        drop(view);
+        if let Some(message)=diagnostic{let _=self.events.send(AppEvent::Diagnostic{message});}
     }
     async fn publish(&self,peer:&Peer) {let _=self.events.send(AppEvent::Device{device:peer.view.read().await.clone()});}
     async fn session(self:Arc<Self>,peer:Arc<Peer>,mut transport:Transport,initiator:bool) {
         let Ok(_guard)=peer.session_lock.try_lock() else{return};
+        if peer.cancel.is_cancelled(){return;}
+        self.update(&peer,"handshaking",None).await;
         let result:Result<()>=async {
-            let (mut send_cipher,mut receive_cipher)=tokio::time::timeout(Duration::from_secs(45),remote::handshake(&mut transport,&peer.code,initiator)).await??;
+            let (mut send_cipher,mut receive_cipher)=tokio::select! {
+                _=peer.cancel.cancelled()=>return Ok(()),
+                result=tokio::time::timeout(Duration::from_secs(45),remote::handshake(&mut transport,&peer.code,initiator))=>result.map_err(|_|anyhow!("设备加密握手超时"))??,
+            };
             let cfg=peer.config.read().await.clone();
             let id=cfg.id.clone();
             let (outgoing,mut outbound)=mpsc::channel::<Control>(128);
@@ -170,10 +191,13 @@ impl Host {
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut last=Instant::now();
             let mut hello_received=false;
+            let identity_deadline=tokio::time::sleep(Duration::from_secs(15));
+            tokio::pin!(identity_deadline);
             let mut assembler=remote::Assembler::default();
             loop {
                 tokio::select! {
                     _=connection.cancel.cancelled()=>break,
+                    _=&mut identity_deadline,if !hello_received=>bail!("设备身份交换超时，请检查另一台电脑的 Relay 状态"),
                     _=heartbeat.tick()=>{
                         ensure!(last.elapsed()<Duration::from_secs(50),"设备心跳超时");
                         connection.outgoing.try_send(Control::Ping).map_err(|_|anyhow!("设备发送队列已满"))?;
@@ -188,7 +212,11 @@ impl Host {
                         }
                     }
                     incoming=transport.incoming.recv()=>{
-                        let Some(Wire::Binary(bytes))=incoming else{bail!("设备连接已断开")};
+                        let bytes=match incoming {
+                            Some(Wire::Binary(bytes))=>bytes,
+                            Some(Wire::Close(4404))=>bail!("中继未找到邀请电脑，请确认邀请电脑正在运行 Relay 且使用同一配对链接"),
+                            _=>bail!("设备连接已断开"),
+                        };
                         let plaintext=receive_cipher.open(&bytes)?;
                         let control=assembler.consume(serde_json::from_slice(&plaintext)?)?;
                         last=Instant::now();
@@ -262,10 +290,7 @@ impl Host {
             for(_,tx)in connection.pending.lock().unwrap_or_else(|e|e.into_inner()).drain(){let _=tx.send(Err("设备已断开；不会自动重发，请刷新会话确认提交状态".into()));}
         }
         let mut view=peer.view.write().await;view.peer_approved=false;view.peer_sharing=false;drop(view);
-        let error=result.err().map(|e|{
-            let text=e.to_string();
-            if text.contains("配对") || text.contains("重放") || text.contains("协议") || text.contains("认证") {text}else{"设备连接已中断，正在等待重连".into()}
-        });
+        let error=result.err().map(|error|error.to_string());
         if !peer.cancel.is_cancelled() && peer.view.read().await.state!="replaced"{self.update(&peer,"offline",error).await;}
     }
     pub async fn call(&self,device:&str,method:&str,params:Value)->Result<Value>{

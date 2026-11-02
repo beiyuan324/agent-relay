@@ -1,8 +1,9 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AlertCircle, Check, ChevronDown, ChevronRight, FileCode2, ListChecks, Loader2, ShieldCheck, Terminal, Wrench, X } from "lucide-react";
-import { message, type Json } from "./api";
+import { AlertCircle, Check, ChevronDown, ChevronRight, FileCode2, ListChecks, Loader2, Terminal, Wrench, X } from "lucide-react";
+import type { Json } from "./api";
+export { Approval } from "./Approval";
 
 function Markdown({ text }: { text: string }) {
   return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{ a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener">{children}</a> }}>{text}</ReactMarkdown></div>;
@@ -146,34 +147,6 @@ export function Transcript({ thread, running, older, hasOlder, loading }: { thre
   </div>;
 }
 
-export function Approval({ request, deviceName, resolve }: { request: Json; deviceName: string; resolve: (id: string, result: Json) => Promise<void> }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const method = request.method;
-  const input = method === "item/tool/requestUserInput";
-  const known = input || method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval";
-  const p = request.params || {};
-  const submit = async (result: Json) => {
-    setBusy(true); setError("");
-    try { await resolve(request.id, result); }
-    catch (error) { setError(message(error)); }
-    finally { setBusy(false); }
-  };
-  return <section className="approval-card" aria-label="待处理审批">
-    <div className="approval-heading"><ShieldCheck size={18} /><div><strong>{input ? "Codex 需要你的补充" : known ? "需要你的确认" : "收到未支持的审批请求"}</strong><p>将在 {deviceName} 上继续</p></div></div>
-    {p.reason && <p>{p.reason}</p>}
-    {p.command && <pre>{Array.isArray(p.command) ? p.command.join(" ") : p.command}</pre>}
-    {p.cwd && <div className="micro muted">{p.cwd}</div>}
-    {p.grantRoot && <p className="file-path">修改范围：{p.grantRoot}</p>}
-    {!input && <details><summary>请求详情</summary><pre>{output(p)}</pre></details>}
-    {input && (p.questions || []).map((question: Json) => <fieldset key={question.id} className="question"><legend>{question.header || "补充信息"}</legend><p>{question.question}</p>{question.options?.length > 0 && <div className="question-options">{question.options.map((option: Json) => <label className={answers[question.id] === option.label ? "selected" : ""} key={option.label}><input type="radio" name={`${request.id}-${question.id}`} value={option.label} checked={answers[question.id] === option.label} onChange={() => setAnswers(previous => ({ ...previous, [question.id]: option.label }))} /><span><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span></label>)}</div>}{(!question.options?.length || question.isOther) && <input type={question.isSecret ? "password" : "text"} placeholder="输入你的回答" value={answers[question.id] || ""} onChange={event => setAnswers(previous => ({ ...previous, [question.id]: event.target.value }))} />}</fieldset>)}
-    {error && <p className="error-text" role="alert">{error}</p>}
-    <div className="approval-actions">
-      {input ? <button className="primary small" disabled={busy || !(p.questions || []).every((q: Json) => answers[q.id]?.trim())} onClick={() => void submit({ answers: Object.fromEntries((p.questions || []).map((q: Json) => [q.id, { answers: [answers[q.id]] }])) })}>{busy ? "正在提交…" : "提交回答"}</button> : known ? <><button className="secondary small" disabled={busy} onClick={() => void submit({ decision: "decline" })}>拒绝</button><button className="primary small" disabled={busy} onClick={() => void submit({ decision: "accept" })}>{busy ? "正在提交…" : "允许这一次"}</button></> : <p className="muted micro">此请求保持待处理。可停止当前回合，并更新 Relay 以支持该审批类型。</p>}
-    </div>
-  </section>;
-}
 export function Inspector({ thread, close }: { thread: Json | undefined; close: () => void }) {
   const changes: Json[] = (thread?.turns || []).flatMap((turn: Json) => (turn.items || []).filter((item: Json) => item.type === "fileChange").flatMap((item: Json) => item.changes || []));
   const diffs: string[] = (thread?.turns || []).filter((turn: Json) => turn.diff).map((turn: Json) => turn.diff);

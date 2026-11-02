@@ -75,6 +75,7 @@ export function DeviceDialog({ device, close, changed }: { device: Device; close
       <div className="info-row"><span>对方确认</span><strong>{device.peerApproved ? "已确认" : "等待对方"}</strong></div>
       <div className="info-row"><span>对方共享</span><strong>{device.peerSharing ? "已启用" : "已暂停"}</strong></div>
     </div>
+    {!device.peer && !device.error && <p className="hint">{device.state === "waiting" ? "本机已就绪，尚未收到另一台电脑的设备身份。请在另一台电脑加入同一配对链接；收到身份后才能确认。" : device.state === "handshaking" ? "正在与另一台电脑完成加密握手和身份交换，完成后会显示设备名称和确认按钮。" : "正在建立连接，尚未进入配对确认阶段。连接失败的原因会显示在这里和连接诊断中。"}</p>}
     {device.error && <p className="error-text">{device.error}</p>}
     {!device.approved && device.peer && <div className="trust-prompt"><ShieldCheck size={20} /><p>确认后，在双方启用共享期间，这台设备可以查看、继续和操作你当前用户的全部 Codex 项目与会话。</p></div>}
     {device.approved && !device.peerApproved && <p className="hint"><CheckCircle2 size={15} />本机已确认，请在另一台电脑上确认此配对。</p>}

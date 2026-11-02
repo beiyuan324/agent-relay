@@ -27,7 +27,7 @@ export const subscribe = (handler: (event: RelayEvent) => void) =>
   listen<RelayEvent>("relay:event", event => handler(event.payload));
 export function message(error: unknown) { return error instanceof Error ? error.message : String(error); }
 export const stateLabels: Record<string, string> = {
-  connected: "已连接", pending: "等待配对确认", connecting: "正在连接", waiting: "等待设备加入",
+  connected: "已连接", pending: "等待配对确认", connecting: "正在连接", handshaking: "正在验证设备身份", waiting: "等待设备加入",
   offline: "未连接", replaced: "连接已被替换", credentialMissing: "需要重新配对",
 };
 export function title(thread: Json) { return thread.name || thread.title || thread.preview?.slice(0, 64) || "新会话"; }

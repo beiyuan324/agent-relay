@@ -1,3 +1,4 @@
+mod approvals;
 pub mod codex;
 pub mod crypto;
 pub mod discovery;

@@ -232,27 +232,8 @@ impl Codex {
         if method == "relay/approval" {
             let id = params["id"].as_str().ok_or_else(|| anyhow!("缺少审批标识"))?;
             let result = params.get("result").cloned().ok_or_else(|| anyhow!("缺少审批结果"))?;
-            let approval_method = lock(&client.approvals).get(id).map(|a|a.message["method"].as_str().unwrap_or_default().to_string()).ok_or_else(||anyhow!("审批已处理或进程已重启，请刷新"))?;
-            match approval_method.as_str() {
-                "item/commandExecution/requestApproval" => {
-                    ensure!(matches!(result["decision"].as_str(),Some("accept"|"decline"|"cancel")), "审批决定无效");
-                }
-                "item/fileChange/requestApproval" => {
-                    ensure!(matches!(result["decision"].as_str(),Some("accept"|"decline"|"cancel")), "审批决定无效");
-                }
-                "item/tool/requestUserInput" => {
-                    let questions=lock(&client.approvals).get(id).map(|a|a.message["params"]["questions"].clone()).unwrap_or(Value::Null);
-                    let questions=questions.as_array().ok_or_else(||anyhow!("补充输入问题无效"))?;
-                    let answers=result["answers"].as_object().ok_or_else(||anyhow!("补充输入格式无效"))?;
-                    ensure!(answers.len()==questions.len(),"请回答全部问题");
-                    for question in questions {
-                        let key=question["id"].as_str().ok_or_else(||anyhow!("补充输入问题标识无效"))?;
-                        let answer=answers.get(key).and_then(|a|a["answers"].as_array()).ok_or_else(||anyhow!("补充输入格式无效"))?;
-                        ensure!(!answer.is_empty() && answer.iter().all(|a|a.as_str().is_some_and(|a|!a.trim().is_empty())),"请回答全部问题");
-                    }
-                }
-                _ => bail!("此审批类型尚未支持。请保留待处理或停止当前回合，并更新 Relay"),
-            }
+            let request = lock(&client.approvals).get(id).map(|approval| approval.message.clone()).ok_or_else(||anyhow!("审批已处理或进程已重启，请刷新"))?;
+            let result = crate::approvals::response(&request, result)?;
             let approval = lock(&client.approvals).remove(id).ok_or_else(||anyhow!("审批已由另一端处理"))?;
             if let Err(error) = client.write(json!({"id":approval.rpc_id.clone(),"result":result})).await {
                 lock(&client.approvals).insert(id.into(),approval); return Err(error);

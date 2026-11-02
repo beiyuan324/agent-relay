@@ -20,8 +20,10 @@ pub async fn handshake(transport: &mut Transport, code: &str, initiator: bool) -
     Ok(keys.streams(initiator))
 }
 async fn next_handshake(transport: &mut Transport) -> Result<Value> {
-    match tokio::time::timeout(Duration::from_secs(20),transport.incoming.recv()).await? {
+    match tokio::time::timeout(Duration::from_secs(20),transport.incoming.recv()).await.map_err(|_|anyhow!("等待另一台电脑握手响应超时，请确认双方 Relay 在线且使用同一配对链接"))? {
         Some(Wire::Text(s)) if s.len() < 4096 => Ok(serde_json::from_str(&s)?),
+        Some(Wire::Close(4404))=>bail!("中继未找到邀请电脑，请确认邀请电脑已连接中继"),
+        Some(Wire::Close(4003))=>bail!("此配对已有连接，请断开其他连接后重试"),
         _=>bail!("握手中断或格式不兼容"),
     }
 }

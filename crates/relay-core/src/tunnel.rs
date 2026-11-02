@@ -8,17 +8,19 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 enum Out { Frame(String,Wire), Closed(String) }
-pub async fn register(endpoint: &str, code: &str, name: &str, incoming: mpsc::Sender<Transport>, cancel: CancellationToken) -> Result<()> {
+pub async fn register(endpoint: &str, code: &str, name: &str, incoming: mpsc::Sender<Transport>, registered: impl std::future::Future<Output = ()>, cancel: CancellationToken) -> Result<()> {
     let mut url = net::endpoint(endpoint,true)?;
     url.set_path("/agent"); url.query_pairs_mut().append_pair("th",&crypto::token_hash(code)?);
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(1024*1024)).max_frame_size(Some(1024*1024));
-    let (socket, _) = tokio::time::timeout(Duration::from_secs(20),tokio_tungstenite::connect_async_with_config(url.as_str(),Some(config),false)).await.map_err(|_|anyhow!("中继连接超时"))?.map_err(|_|anyhow!("无法连接 Workers 中继"))?;
+    let (socket, _) = tokio::time::timeout(Duration::from_secs(20),tokio_tungstenite::connect_async_with_config(url.as_str(),Some(config),false)).await.map_err(|_|anyhow!("中继连接超时"))?.map_err(|error|anyhow!("无法连接 Workers 中继：{error}"))?;
     let stop = cancel.child_token();
     let _stop = stop.clone().drop_guard();
     let mut transport = net::bridge(socket, stop.clone());
     net::send_json(&transport.outgoing, &json!({"t":"register","tokenHash":crypto::token_hash(code)?,"name":name})).await?;
-    let first = tokio::time::timeout(Duration::from_secs(15),transport.incoming.recv()).await?;
+    let first = tokio::time::timeout(Duration::from_secs(15),transport.incoming.recv()).await.map_err(|_|anyhow!("中继注册确认超时"))?;
+    if matches!(first, Some(Wire::Close(4000))) { bail!("replaced"); }
     ensure!(matches!(first,Some(Wire::Text(ref s)) if serde_json::from_str::<Value>(s).is_ok_and(|v|v["t"]=="registered")), "中继未确认注册");
+    registered.await;
     let (commands, mut command_rx) = mpsc::channel::<Out>(64);
     let mut tunnels: HashMap<String,mpsc::Sender<Wire>> = HashMap::new();
     let result: Result<()> = async {

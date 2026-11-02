@@ -31,6 +31,7 @@ export default function App() {
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
   const beginNewThread = useCallback((cwd?: string, projectId?: string) => { setNewThreadCwd(cwd); setNewThreadProjectId(projectId); setDialog("new"); }, []);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const promptedPairs = useRef(new Set<string>());
   const [error, setError] = useState("");
   const [booting, setBooting] = useState(desktop);
   const [inspector, setInspector] = useState(false);
@@ -76,12 +77,23 @@ export default function App() {
   const deviceName = local ? snapshot?.settings.identity.name || "这台电脑" : device?.peer?.name || "另一台电脑";
   const workbench = useWorkbench(deviceId, available, setError);
   const relayEvent = useRef(workbench.event); relayEvent.current = workbench.event;
+  const deviceEventVersion = useRef(0);
+  const deviceEvents = useRef(new Map<string, { version: number; device: Device }>());
+  const readSnapshot = useCallback(async (stopped: () => boolean = () => false) => {
+    const version = deviceEventVersion.current;
+    const snapshot = await command<Snapshot>("snapshot");
+    if (stopped()) return;
+    const devices = new Map(snapshot.devices.map(device => [device.id, device]));
+    for (const update of deviceEvents.current.values()) {
+      if (update.version > version) devices.set(update.device.id, update.device);
+    }
+    setSnapshot({ ...snapshot, devices: [...devices.values()] });
+  }, []);
   const refresh = useCallback(async (select?: string) => {
     if (!desktop) return;
-    const snapshot = await command<Snapshot>("snapshot");
-    setSnapshot(snapshot);
+    await readSnapshot();
     if (select) setDeviceId(select);
-  }, []);
+  }, [readSnapshot]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -92,6 +104,7 @@ export default function App() {
         if (stopped) return;
         if (event.type === "device" && typeof event.device === "object") {
           const device = event.device as Device;
+          deviceEvents.current.set(device.id, { version: ++deviceEventVersion.current, device });
           setSnapshot(previous => previous ? { ...previous, devices: [...previous.devices.filter(d => d.id !== device.id), device] } : previous);
         } else if (event.type === "diagnostic" && typeof event.message === "string") {
           const text = event.message;
@@ -100,11 +113,22 @@ export default function App() {
         } else relayEvent.current(event);
       });
       if (stopped) { dispose(); return; }
-      const snapshot = await command<Snapshot>("snapshot");
-      if (!stopped) { setSnapshot(snapshot); setBooting(false); }
+      await readSnapshot(() => stopped);
+      if (!stopped) setBooting(false);
     })().catch(error => { if (!stopped) { setError(message(error)); setBooting(false); } });
     return () => { stopped = true; dispose?.(); };
-  }, []);
+  }, [readSnapshot]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    if (details?.state === "pending" && !details.approved) promptedPairs.current.add(details.id);
+    if (details || (dialog !== null && dialog !== "pair")) return;
+    const pending = snapshot.devices.find(device => device.state === "pending" && device.peer && !device.approved && !promptedPairs.current.has(device.id));
+    if (!pending) return;
+    promptedPairs.current.add(pending.id);
+    setDialog(null);
+    setDetailId(pending.id);
+  }, [snapshot, details, dialog]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = snapshot?.settings.theme || "system";
@@ -221,7 +245,7 @@ export default function App() {
       <button className={`device-item ${local ? "selected" : ""}`} title={`${snapshot?.settings.identity.name || "这台电脑"} · ${desktop ? "本机 Codex" : "桌面预览"}`} aria-label={`${snapshot?.settings.identity.name || "这台电脑"}（本机）`} aria-pressed={local} onClick={() => { setDeviceId("local"); setSidebarOverlay(false); setError(""); }}><span className="device-icon"><Laptop size={19} /><span className={`status-dot device-status ${desktop && snapshot ? "connected" : ""}`} aria-hidden="true" /></span><span className="device-copy"><strong>{snapshot?.settings.identity.name || "这台电脑"}</strong><small>{desktop ? "本机 Codex" : "桌面预览"}</small></span></button>
       <div className="sidebar-section-label devices-label"><span>远程设备</span><button className="icon-button" title="添加设备" aria-label="添加设备" onClick={() => setDialog("pair")}><Plus size={15} /></button></div>
       <div className="paired-devices">
-        {snapshot?.devices.map(device => <div className="device-row" key={device.id}><button className={`device-item ${deviceId === device.id ? "selected" : ""}`} title={`${device.peer?.name || "等待设备加入"} · ${stateLabels[device.state] || device.state}`} aria-label={`${device.peer?.name || "等待设备加入"} · ${stateLabels[device.state] || device.state}`} aria-pressed={deviceId === device.id} onClick={() => { setDeviceId(device.id); setSidebarOverlay(false); setError(""); }}><span className="device-icon"><Monitor size={19} /><span className={`status-dot device-status ${device.state}`} aria-hidden="true" /></span><span className="device-copy"><strong>{device.peer?.name || "等待设备加入"}</strong><small>{stateLabels[device.state] || device.state}</small></span>{device.mode === "relay" ? <Globe2 size={13} className="connection-icon" /> : <Wifi size={13} className="connection-icon" />}</button><button className="device-more icon-button" title="设备详情" aria-label={`${device.peer?.name || "设备"}详情`} onClick={() => setDetailId(device.id)}><MoreHorizontal size={16} /></button></div>)}
+        {snapshot?.devices.map(device => <div className="device-row" key={device.id}><button className={`device-item ${deviceId === device.id ? "selected" : ""}`} title={`${device.peer?.name || "等待设备加入"} · ${stateLabels[device.state] || device.state}`} aria-label={`${device.peer?.name || "等待设备加入"} · ${stateLabels[device.state] || device.state}`} aria-pressed={deviceId === device.id} onClick={() => { setDeviceId(device.id); setSidebarOverlay(false); setError(""); if (device.state === "pending" && !device.approved) setDetailId(device.id); }}><span className="device-icon"><Monitor size={19} /><span className={`status-dot device-status ${device.state}`} aria-hidden="true" /></span><span className="device-copy"><strong>{device.peer?.name || "等待设备加入"}</strong><small>{stateLabels[device.state] || device.state}</small></span>{device.mode === "relay" ? <Globe2 size={13} className="connection-icon" /> : <Wifi size={13} className="connection-icon" />}</button><button className="device-more icon-button" title="设备详情" aria-label={`${device.peer?.name || "设备"}详情`} onClick={() => setDetailId(device.id)}><MoreHorizontal size={16} /></button></div>)}
         {!snapshot?.devices.length && <div className="no-devices"><p>未添加远程设备</p><button className="add-device-inline" onClick={() => setDialog("pair")}><Plus size={13} />添加设备</button></div>}
       </div>
       <div className="sidebar-bottom"><div className="share-card"><div className="share-card-top"><span className="share-symbol"><ShieldCheck size={17} /></span><div><strong>共享这台电脑</strong><small>{snapshot?.settings.sharing ? "已配对设备可访问 Codex" : "远端暂时无法访问本机"}</small></div><button className={`switch ${snapshot?.settings.sharing ? "on" : ""}`} role="switch" aria-checked={!!snapshot?.settings.sharing} aria-label="共享这台电脑" disabled={!desktop || !snapshot || sharingBusy} onClick={() => void toggleSharing()}><span /></button></div></div><button className={`compact-share ${snapshot?.settings.sharing ? "is-sharing" : ""}`} role="switch" aria-checked={!!snapshot?.settings.sharing} aria-label="共享这台电脑" title={snapshot?.settings.sharing ? "本机共享已开启，点击暂停" : "本机共享已暂停，点击开启"} disabled={!desktop || !snapshot || sharingBusy} onClick={() => void toggleSharing()}><ShieldCheck size={20} /></button><button className="sidebar-footer-button" title={`设置 (${modifier}+,)`} aria-label="设置" onClick={() => setDialog("settings")}><Settings2 size={18} /><span className="sidebar-footer-label">设置</span><span className="footer-meta">{modifier} ,</span></button><button className={`sidebar-footer-button ${snapshot?.diagnostics.length ? "has-diagnostics" : ""}`} title={snapshot?.diagnostics.length ? `连接诊断：${snapshot.diagnostics.length} 条记录` : "连接诊断"} aria-label="连接诊断" onClick={() => setDialog("diagnostics")}><Activity size={18} /><span className="sidebar-footer-label">连接诊断</span><span className={`footer-meta ${snapshot?.diagnostics.length ? "diagnostic-count" : ""}`}>{snapshot?.diagnostics.length || ""}</span></button><div className="sidebar-footnote"><LockKeyhole size={11} />设备之间，端到端加密</div></div>
@@ -272,7 +296,7 @@ export default function App() {
       {error && <div className="error-banner" role="alert" inert={inspectorDrawer}><AlertCircle size={15} /><span>{error}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setError("")}><X size={14} /></button></div>}
       <div className="workspace-content">
         <div className="conversation-column" inert={inspectorDrawer}>
-          {booting ? <div className="center-state"><Loader2 className="spin" size={27} /><h2>正在准备工作空间</h2></div> : !local && !available ? <div className="center-state device-state"><span className="state-illustration"><Monitor size={49} strokeWidth={1.1} /><span className={`status-dot ${device?.state}`} /></span><h2>{device?.state === "pending" ? "确认这台电脑" : device?.state === "connected" ? "对方已暂停共享" : device?.state === "waiting" ? "等待另一台电脑加入" : "等待设备连接"}</h2><p>{device?.state === "pending" ? `请核对“${deviceName}”的身份，并在双方电脑上确认配对。` : device?.state === "connected" ? "请在执行电脑上开启共享，然后就能继续工作。" : device?.error || "连接恢复后，可以重新读取会话。任务和审批不会自动重发。"}</p>{device && <div className="center-actions">{!device.approved && device.peer ? <button className="primary" onClick={() => setDetailId(device.id)}><ShieldCheck size={16} />确认设备身份</button> : <button className="secondary" onClick={() => setDetailId(device.id)}>设备详情</button>}{device.state !== "pending" && device.state !== "connected" && <button className="primary" onClick={() => void action("reconnect_device", { id: device.id })}><RefreshCw size={15} />重新连接</button>}</div>}</div> : workbench.selected && workbench.thread ? <><div className="conversation-notices"><div className="conversation-context"><LockKeyhole size={12} /><span>{local ? "本机执行" : "加密连接"}</span><span className="context-permissions"><ShieldCheck size={12} />{workbench.thread.relayArchived ? "已归档" : !workbench.ready ? "尚未接续" : typeof workbench.permissions?.approvalPolicy === "string" ? `审批：${workbench.permissions.approvalPolicy}` : "沿用主机权限"}{workbench.permissions?.sandbox?.type ? ` · ${workbench.permissions.sandbox.type}` : ""}</span>{workbench.opening && <Loader2 size={13} className="spin" />}</div>{workbench.resumeError && <div className="session-banner" role="status"><AlertCircle size={16} /><div><strong>暂时无法接续 · 仅查看历史</strong><p>{workbench.resumeError}</p></div><button className="secondary small" disabled={!available || workbench.opening} onClick={() => { setError(""); if (workbench.selected) void workbench.open(workbench.selected); }}><RefreshCw size={13} />{workbench.opening ? "正在读取…" : "重试接续"}</button></div>}
+          {booting ? <div className="center-state"><Loader2 className="spin" size={27} /><h2>正在准备工作空间</h2></div> : !local && !available ? <div className="center-state device-state"><span className="state-illustration"><Monitor size={49} strokeWidth={1.1} /><span className={`status-dot ${device?.state}`} /></span><h2>{device?.state === "pending" ? "确认这台电脑" : device?.state === "connected" ? "对方已暂停共享" : device?.state === "waiting" ? "等待另一台电脑加入" : device?.state === "handshaking" ? "正在验证设备身份" : "等待设备连接"}</h2><p>{device?.state === "pending" ? `请核对“${deviceName}”的身份，并在双方电脑上确认配对。` : device?.state === "connected" ? "请在执行电脑上开启共享，然后就能继续工作。" : device?.error || (device?.state === "waiting" ? "等待另一台电脑使用配对链接加入；收到设备身份后才会出现确认按钮。" : device?.state === "handshaking" ? "正在完成加密握手和设备身份交换，完成后请在双方电脑上确认。" : device?.state === "connecting" ? "正在连接设备或 Workers 中继。连接失败时会显示具体原因。" : "连接恢复后，可以重新读取会话。任务和审批不会自动重发。")}</p>{device && <div className="center-actions">{!device.approved && device.peer ? <button className="primary" onClick={() => setDetailId(device.id)}><ShieldCheck size={16} />确认设备身份</button> : <button className="secondary" onClick={() => setDetailId(device.id)}>设备详情</button>}{device.state !== "pending" && device.state !== "connected" && <button className="primary" onClick={() => void action("reconnect_device", { id: device.id })}><RefreshCw size={15} />重新连接</button>}</div>}</div> : workbench.selected && workbench.thread ? <><div className="conversation-notices"><div className="conversation-context"><LockKeyhole size={12} /><span>{local ? "本机执行" : "加密连接"}</span><span className="context-permissions"><ShieldCheck size={12} />{workbench.thread.relayArchived ? "已归档" : !workbench.ready ? "尚未接续" : typeof workbench.permissions?.approvalPolicy === "string" ? `审批：${workbench.permissions.approvalPolicy}` : "沿用主机权限"}{workbench.permissions?.sandbox?.type ? ` · ${workbench.permissions.sandbox.type}` : ""}</span>{workbench.opening && <Loader2 size={13} className="spin" />}</div>{workbench.resumeError && <div className="session-banner" role="status"><AlertCircle size={16} /><div><strong>暂时无法接续 · 仅查看历史</strong><p>{workbench.resumeError}</p></div><button className="secondary small" disabled={!available || workbench.opening} onClick={() => { setError(""); if (workbench.selected) void workbench.open(workbench.selected); }}><RefreshCw size={13} />{workbench.opening ? "正在读取…" : "重试接续"}</button></div>}
             {workbench.thread.relayArchived && <div className="session-banner archived-banner" role="status"><Archive size={16} /><div><strong>此会话已归档</strong><p>恢复后可继续发送消息。</p></div><button className="secondary small" disabled={!available || workbench.opening || workbench.isArchiveBusy(workbench.thread.id)} onClick={() => { setError(""); void workbench.changeArchive(workbench.thread!, false); }}><ArchiveRestore size={14} />{workbench.isArchiveBusy(workbench.thread.id) ? "正在恢复…" : "恢复会话"}</button></div>}
             {workbench.historyError && <div className="session-banner history-warning" role="status"><AlertCircle size={15} /><div><p>{workbench.historyError}</p></div></div>}
             </div>
@@ -304,7 +328,7 @@ export default function App() {
       setCollapsedProjects(previous => { const next = { ...previous, [projectKey(target, project?.id || "unassigned")]: false }; if (project) for (const root of project.rootPaths) delete next[projectKey(target, root)]; return next; });
     }} />}
     {dialog === "help" && <Modal title="使用帮助" close={() => setDialog(null)}><div className="help-steps"><p><strong>1. 准备 Codex</strong><br />两台电脑安装 Relay 和 Codex，并分别完成本机登录。</p><p><strong>2. 创建并加入邀请</strong><br />选择“添加设备”。同一网络使用局域网地址，异地连接使用已部署的 Workers 中继。</p><p><strong>3. 双方确认并启用共享</strong><br />核对设备身份，分别确认配对，并打开需要被访问的电脑的共享开关。</p><p><strong>4. 选择执行电脑</strong><br />设备栏切换电脑，选择或新建会话。每次发送前可在工具栏确认执行位置。</p><p className="muted micro">网络恢复后重新读取会话。Relay 不会自动重发任务或审批，也不接管其他 Codex 进程中的活跃任务。{modifier}+K 搜索，{modifier}+N 新建，{modifier}+, 设置。</p></div></Modal>}
-    {details && <DeviceDialog device={details} close={() => setDetailId(null)} changed={() => refresh()} />}
+    {details && <DeviceDialog key={details.id} device={details} close={() => setDetailId(null)} changed={() => refresh()} />}
     </div>
   </div>;
 }

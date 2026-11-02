@@ -90,7 +90,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static {
 pub async fn connect(url: Url, cancel: CancellationToken) -> Result<Transport> {
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(1024 * 1024)).max_frame_size(Some(1024 * 1024));
-    let (socket, _) = tokio::time::timeout(Duration::from_secs(20),tokio_tungstenite::connect_async_with_config(url.as_str(),Some(config),false)).await.map_err(|_|anyhow!("连接超时"))?.map_err(|_|anyhow!("无法连接设备，请检查地址、网络及防火墙"))?;
+    let (socket, _) = tokio::time::timeout(Duration::from_secs(20),tokio_tungstenite::connect_async_with_config(url.as_str(),Some(config),false)).await.map_err(|_|anyhow!("连接超时"))?.map_err(|error|anyhow!("无法连接设备：{error}"))?;
     Ok(bridge(socket,cancel))
 }
 pub async fn send_json(out: &mpsc::Sender<Wire>, value: &Value) -> Result<()> {

@@ -3,7 +3,7 @@ use directories::ProjectDirs;
 use relay_core::{host::Host, relay, AppEvent, ConnectionMode, Settings};
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::VecDeque, io::Write, path::PathBuf, sync::Arc};
+use std::{collections::{HashSet, VecDeque}, io::Write, path::PathBuf, sync::Arc};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 
@@ -174,11 +174,17 @@ pub fn run() {
                 });
                 let event_state=state.clone();let event_handle=handle.clone();
                 tauri::async_runtime::spawn(async move {
+                    let mut prompted_pairs=HashSet::new();
                     loop {
                         match events.recv().await {
                             Ok(AppEvent::Persist)=>{let _=persist.try_send(());},
                             Ok(event)=>{
                                 if let AppEvent::Diagnostic{message}=&event{event_state.diagnostic(message.clone()).await;}
+                                if let AppEvent::Device{device}=&event {
+                                    if device.state=="pending" && !device.approved && device.peer.is_some() && prompted_pairs.insert(device.id.clone()) {
+                                        tray::show_window(&event_handle);
+                                    }
+                                }
                                 let _=event_handle.emit("relay:event",event);
                             },
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{

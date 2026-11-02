@@ -31,7 +31,7 @@ fn restore_window(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
-fn show_window(app: &AppHandle) {
+pub(super) fn show_window(app: &AppHandle) {
     if let Err(error) = restore_window(app) {
         report(app, format!("无法显示 Relay 窗口：{error}"));
     }
