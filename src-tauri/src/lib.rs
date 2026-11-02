@@ -8,6 +8,7 @@ use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 mod tray;
+mod updater;
 
 struct Desktop {
     host: Arc<Host>,
@@ -140,6 +141,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(tray::on_window_event)
         .setup(|app|{
             let directories=ProjectDirs::from("app","agent-relay","Relay").ok_or_else(||anyhow!("无法定位用户设置目录"))?;
@@ -153,6 +155,7 @@ pub fn run() {
             let host=Host::new(settings);
             let state=Arc::new(Desktop{host:host.clone(),path,mutation:Mutex::new(()),saved:Mutex::new(None),diagnostics:Mutex::new(VecDeque::new())});
             app.manage(state.clone());
+            app.manage(updater::Updates::new(app.package_info().version.to_string()));
             tray::setup(app)?;
             let handle=app.handle().clone();
             tauri::async_runtime::block_on(async move {
@@ -207,7 +210,7 @@ pub fn run() {
             })?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![snapshot,detect_codex,codex_call,create_invitation,join_invitation,approve_device,remove_device,reconnect_device,set_sharing,save_settings])
+        .invoke_handler(tauri::generate_handler![snapshot,detect_codex,codex_call,create_invitation,join_invitation,approve_device,remove_device,reconnect_device,set_sharing,save_settings,updater::update_status,updater::check_for_updates,updater::download_update,updater::install_update])
         .build(tauri::generate_context!())
         .expect("Relay 无法启动")
         .run(|app,event|{

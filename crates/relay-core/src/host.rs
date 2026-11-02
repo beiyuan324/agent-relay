@@ -29,11 +29,12 @@ pub struct Host {
     peers: RwLock<HashMap<String,Arc<Peer>>>,
     cancel: CancellationToken,
     listener_error: RwLock<Option<String>>,
+    operations: Arc<RwLock<()>>,
 }
 impl Host {
     pub fn new(settings: Settings) -> Arc<Self> {
         let (events, _) = broadcast::channel(2048);
-        Arc::new(Self {codex:Codex::new(settings.codex_path.clone()),events,settings:RwLock::new(settings),peers:RwLock::new(HashMap::new()),cancel:CancellationToken::new(),listener_error:RwLock::new(None)})
+        Arc::new(Self {codex:Codex::new(settings.codex_path.clone()),events,settings:RwLock::new(settings),peers:RwLock::new(HashMap::new()),cancel:CancellationToken::new(),listener_error:RwLock::new(None),operations:Arc::new(RwLock::new(()))})
     }
     pub async fn start(self: &Arc<Self>) {
         let host = self.clone();
@@ -262,6 +263,7 @@ impl Host {
                                     let _permit=permit;
                                     // Finish accepted calls even if the peer disconnects, so local
                                     // approval and turn bookkeeping reaches a consistent state.
+                                    let _operation=host.operations.read().await;
                                     let result=host.codex.call(&method,params).await;
                                     if connection.cancel.is_cancelled() || !host.settings.read().await.sharing || !connection.ready.load(Ordering::Acquire){return;}
                                     let frame=match result{Ok(value)=>Control::Response{id:request_id,result:Some(value),error:None},Err(error)=>Control::Response{id:request_id,result:None,error:Some(error.to_string())}};
@@ -293,7 +295,13 @@ impl Host {
         let error=result.err().map(|error|error.to_string());
         if !peer.cancel.is_cancelled() && peer.view.read().await.state!="replaced"{self.update(&peer,"offline",error).await;}
     }
+    pub async fn prepare_update(&self)->Result<tokio::sync::OwnedRwLockWriteGuard<()>> {
+        let guard=self.operations.clone().try_write_owned().map_err(|_|anyhow!("还有设备请求正在处理，请稍后安装更新"))?;
+        ensure!(!self.codex.has_pending_work().await,"本机还有运行中的回合或待处理审批，请完成后再安装更新");
+        Ok(guard)
+    }
     pub async fn call(&self,device:&str,method:&str,params:Value)->Result<Value>{
+        let _operation=self.operations.read().await;
         if device=="local"{return self.codex.call(method,params).await;}
         let peer=self.peers.read().await.get(device).cloned().ok_or_else(||anyhow!("设备不存在"))?;
         let connection=peer.connection.read().await.clone().ok_or_else(||anyhow!("设备未连接"))?;

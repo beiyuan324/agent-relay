@@ -1,0 +1,93 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag, for example v0.0.4"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RELAY_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Prepare signed release
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $relayPackage = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
+          $relayConfig = Get-Content -LiteralPath src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $relayCargo = Get-Content -LiteralPath Cargo.toml -Raw
+          $relayWorkspace = [regex]::Match($relayCargo, '(?s)\[workspace\.package\]\s*version\s*=\s*"([^"]+)"')
+          if ($env:RELAY_RELEASE_TAG -ne "v$($relayPackage.version)" -or $relayConfig.version -ne $relayPackage.version -or $relayWorkspace.Groups[1].Value -ne $relayPackage.version) {
+            throw "Release tag and app versions must match"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "Missing TAURI_SIGNING_PRIVATE_KEY repository secret"
+          }
+          $relayFlags = @(
+            "--remap-path-prefix=$env:USERPROFILE=/build/user",
+            "--remap-path-prefix=$env:GITHUB_WORKSPACE=/build/agent-relay"
+          ) -join [char]0x1f
+          "CARGO_ENCODED_RUSTFLAGS=$relayFlags" >> $env:GITHUB_ENV
+
+      - run: npm ci
+
+      - name: Build and upload signed Windows updater
+        id: release
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ env.RELAY_RELEASE_TAG }}
+          releaseName: "Relay ${{ env.RELAY_RELEASE_TAG }}"
+          releaseDraft: true
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          uploadUpdaterSignatures: true
+          args: --bundles nsis -- --locked
+
+      - name: Attach installer checksums
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $relayInstallers = @(Get-ChildItem -LiteralPath target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($relayInstallers.Count -ne 1) { throw "Expected one Windows installer" }
+          $relayHashes = $relayInstallers | ForEach-Object {
+            $relayHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$relayHash  $($_.Name)"
+          }
+          Set-Content -LiteralPath target/release/bundle/nsis/SHA256SUMS.txt -Value $relayHashes -Encoding utf8NoBOM
+          gh release upload $env:RELAY_RELEASE_TAG target/release/bundle/nsis/SHA256SUMS.txt --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload checksums" }

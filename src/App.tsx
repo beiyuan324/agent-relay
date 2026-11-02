@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, Archive, ArchiveRestore, ArrowUp, ChevronDown, ChevronRight, CircleHelp, FileCode2, Folder, Globe2, Laptop, Loader2, LockKeyhole, Monitor, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, Settings2, ShieldCheck, Square, Wifi, X } from "lucide-react";
 import { command, desktop, message, stateLabels, subscribe, title, when, type Device, type Json, type Snapshot } from "./api";
 import { useWorkbench } from "./workbench";
+import { updateProgress, useUpdates } from "./updates";
 import { groupProjectThreads, type ProjectGroup } from "./projects";
 import { WindowTitlebar } from "./WindowTitlebar";
 import { MentionComposer } from "./MentionComposer";
@@ -24,6 +25,7 @@ function readCollapsedProjects(): Record<string, boolean> {
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const updates = useUpdates();
   const [deviceId, setDeviceId] = useState("local");
   const [dialog, setDialog] = useState<Dialog>(null);
   const [newThreadCwd, setNewThreadCwd] = useState<string | undefined>();
@@ -294,6 +296,7 @@ export default function App() {
       </header>
       {!desktop && <div className="preview-banner" inert={inspectorDrawer}><Monitor size={14} />这是界面预览。请通过 Relay 桌面应用连接真实设备和 Codex。</div>}
       {error && <div className="error-banner" role="alert" inert={inspectorDrawer}><AlertCircle size={15} /><span>{error}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setError("")}><X size={14} /></button></div>}
+      {["available", "downloading", "ready", "installing"].includes(updates.status.phase) && <div className="update-banner" role="status" inert={modalOpen || inspectorDrawer}><RefreshCw size={15} className={updates.status.phase === "downloading" || updates.status.phase === "installing" ? "spin" : ""} /><span>{updates.status.phase === "downloading" ? `正在下载 Relay 更新 · ${updateProgress(updates.status)}` : updates.status.phase === "ready" ? `Relay ${updates.status.version} 已准备好安装` : updates.status.phase === "installing" ? "正在安装 Relay 更新…" : `Relay ${updates.status.version} 可更新`}</span><button className="secondary small" onClick={() => setDialog("settings")}>查看更新</button></div>}
       <div className="workspace-content">
         <div className="conversation-column" inert={inspectorDrawer}>
           {booting ? <div className="center-state"><Loader2 className="spin" size={27} /><h2>正在准备工作空间</h2></div> : !local && !available ? <div className="center-state device-state"><span className="state-illustration"><Monitor size={49} strokeWidth={1.1} /><span className={`status-dot ${device?.state}`} /></span><h2>{device?.state === "pending" ? "确认这台电脑" : device?.state === "connected" ? "对方已暂停共享" : device?.state === "waiting" ? "等待另一台电脑加入" : device?.state === "handshaking" ? "正在验证设备身份" : "等待设备连接"}</h2><p>{device?.state === "pending" ? `请核对“${deviceName}”的身份，并在双方电脑上确认配对。` : device?.state === "connected" ? "请在执行电脑上开启共享，然后就能继续工作。" : device?.error || (device?.state === "waiting" ? "等待另一台电脑使用配对链接加入；收到设备身份后才会出现确认按钮。" : device?.state === "handshaking" ? "正在完成加密握手和设备身份交换，完成后请在双方电脑上确认。" : device?.state === "connecting" ? "正在连接设备或 Workers 中继。连接失败时会显示具体原因。" : "连接恢复后，可以重新读取会话。任务和审批不会自动重发。")}</p>{device && <div className="center-actions">{!device.approved && device.peer ? <button className="primary" onClick={() => setDetailId(device.id)}><ShieldCheck size={16} />确认设备身份</button> : <button className="secondary" onClick={() => setDetailId(device.id)}>设备详情</button>}{device.state !== "pending" && device.state !== "connected" && <button className="primary" onClick={() => void action("reconnect_device", { id: device.id })}><RefreshCw size={15} />重新连接</button>}</div>}</div> : workbench.selected && workbench.thread ? <><div className="conversation-notices"><div className="conversation-context"><LockKeyhole size={12} /><span>{local ? "本机执行" : "加密连接"}</span><span className="context-permissions"><ShieldCheck size={12} />{workbench.thread.relayArchived ? "已归档" : !workbench.ready ? "尚未接续" : typeof workbench.permissions?.approvalPolicy === "string" ? `审批：${workbench.permissions.approvalPolicy}` : "沿用主机权限"}{workbench.permissions?.sandbox?.type ? ` · ${workbench.permissions.sandbox.type}` : ""}</span>{workbench.opening && <Loader2 size={13} className="spin" />}</div>{workbench.resumeError && <div className="session-banner" role="status"><AlertCircle size={16} /><div><strong>暂时无法接续 · 仅查看历史</strong><p>{workbench.resumeError}</p></div><button className="secondary small" disabled={!available || workbench.opening} onClick={() => { setError(""); if (workbench.selected) void workbench.open(workbench.selected); }}><RefreshCw size={13} />{workbench.opening ? "正在读取…" : "重试接续"}</button></div>}
@@ -320,7 +323,7 @@ export default function App() {
       </div>
     </main>
     {dialog === "pair" && <PairDialog snapshot={snapshot} close={() => setDialog(null)} changed={refresh} />}
-    {dialog === "settings" && <SettingsDialog snapshot={snapshot} close={() => setDialog(null)} changed={async () => { await refresh(); workbench.refresh(); }} />}
+    {dialog === "settings" && <SettingsDialog snapshot={snapshot} updates={updates} close={() => setDialog(null)} changed={async () => { await refresh(); workbench.refresh(); }} />}
     {dialog === "diagnostics" && <DiagnosticsDialog snapshot={snapshot} close={() => setDialog(null)} />}
     {dialog === "new" && <NewThreadDialog key={deviceId} projects={projects} initialCwd={newThreadCwd} initialProjectId={newThreadProjectId} deviceName={deviceName} close={() => setDialog(null)} create={async (cwd, project) => {
       const target = deviceId;

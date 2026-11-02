@@ -1,6 +1,6 @@
 {
   "name": "agent-relay",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -23,7 +23,7 @@
     "remark-gfm": "^4.0.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.8.0",
+    "@tauri-apps/cli": "~2.12.4",
     "@testing-library/react": "^16.3.3",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

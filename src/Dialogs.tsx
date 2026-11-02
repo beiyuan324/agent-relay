@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useFocusScope } from "./ui";
+import { UpdateSettings } from "./UpdateSettings";
+import type { Updates } from "./updates";
 import type { CodexProject } from "./projects";
 import { version as appVersion } from "../package.json";
 import { open as pickFile } from "@tauri-apps/plugin-dialog";
@@ -83,7 +85,7 @@ export function DeviceDialog({ device, close, changed }: { device: Device; close
   </Modal>;
 }
 
-export function SettingsDialog({ snapshot, close, changed }: { snapshot: Snapshot | null; close: () => void; changed: () => Promise<void> }) {
+export function SettingsDialog({ snapshot, updates, close, changed }: { snapshot: Snapshot | null; updates: Updates; close: () => void; changed: () => Promise<void> }) {
   const nameInput = useRef<HTMLInputElement>(null);
   const [name, setName] = useState(snapshot?.settings.identity.name || "");
   const [path, setPath] = useState(snapshot?.settings.codexPath || "");
@@ -127,6 +129,7 @@ export function SettingsDialog({ snapshot, close, changed }: { snapshot: Snapsho
   return <Modal title="设置" subtitle="管理本机名称、外观和连接。" close={close} wide initialFocus={nameInput} footer={<div className="dialog-footer"><span className="micro muted">Relay {appVersion}</span><button className="primary" disabled={busy || detecting || !name.trim()} onClick={() => void save()}>{busy ? "正在保存…" : "完成"}</button></div>}>
     <div className="form-section-label">这台电脑</div><div className="settings-group"><label className="setting-field">设备名称<input ref={nameInput} value={name} maxLength={80} onChange={event => setName(event.target.value)} /></label><label className="setting-field">外观<select value={theme} onChange={event => setTheme(event.target.value as typeof theme)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label></div>
     <div className="form-section-label">Codex</div><div className="settings-group"><label className="setting-field vertical">可执行文件<div className="input-with-button"><input value={path} title={path || installation?.path} disabled={detecting || busy} placeholder={installation && !path ? "自动检测（已找到 Codex）" : "留空以自动检测"} onChange={event => { setPath(event.target.value); setInstallation(null); setDetectionError(""); }} /><button className="secondary small" disabled={detecting || busy || !desktop} onClick={() => { void pickFile({ multiple: false, directory: false, title: "选择 Codex 可执行文件" }).then(value => { if (typeof value === "string") { setPath(value); setInstallation(null); setDetectionError(""); } }).catch(error => setError(message(error))); }}>选择…</button></div></label><div className="codex-detection"><div className="codex-detection-result" aria-live="polite">{detecting ? <span className="muted"><Loader2 className="spin" size={13} />正在查找 Codex…</span> : installation && !path ? <><span className="codex-found"><CheckCircle2 size={13} />已找到 · {installation.source}</span><code title={installation.path}>{installation.path}</code></> : <span className="muted">{path ? "当前使用手动指定的路径" : desktop ? "自动查找本机 Codex 安装" : "请在桌面应用中检测"}</span>}</div><button className="secondary small" disabled={detecting || busy || !desktop} onClick={() => void detect()}>自动检测</button></div>{detectionError && <p className="group-note error-text" role="status">{detectionError}</p>}<p className="group-note">留空会在启动时自动查找，安装更新后无需重选路径。复用本机登录与配置；更改此设置前请先停止运行中的回合。</p></div>
+    <UpdateSettings updates={updates} />
     <div className="form-section-label">连接</div><div className="settings-group"><label className="setting-field vertical">默认 Workers 中继地址<input value={relay} title={relay} placeholder="https://your-relay.workers.dev" onChange={event => setRelay(event.target.value)} /></label><p className="group-note">局域网监听端口：{snapshot?.settings.listenPort || 47321}。已有设备使用各自配对时的中继地址。</p></div>
     {error && <p className="error-text" role="alert">{error}</p>}
   </Modal>;

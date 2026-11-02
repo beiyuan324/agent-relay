@@ -28,6 +28,7 @@ struct Client {
     resume_lock: Mutex<()>,
     start_locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
     ended: CancellationToken,
+    process_exited: CancellationToken,
 }
 fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
 
@@ -63,7 +64,16 @@ impl Codex {
         if let Some(client) = slot.take() { client.ended.cancel(); }
     }
     pub async fn shutdown(&self) {
-        if let Some(client) = self.client.lock().await.take() { client.ended.cancel(); }
+        let client = self.client.lock().await.take();
+        if let Some(client) = client {
+            client.ended.cancel();
+            let _ = tokio::time::timeout(Duration::from_secs(5), client.process_exited.cancelled()).await;
+        }
+    }
+    pub async fn has_pending_work(&self) -> bool {
+        let slot = self.client.lock().await;
+        slot.as_ref().is_some_and(|client| !client.ended.is_cancelled()
+            && (!lock(&client.active).is_empty() || !lock(&client.approvals).is_empty() || !lock(&client.pending).is_empty()))
     }
     async fn executable(&self) -> Result<PathBuf> {
         let mut installation = self.installation.lock().await;
@@ -94,7 +104,7 @@ impl Codex {
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("无法连接 Codex stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("无法连接 Codex stdout"))?;
         let (writer, writes) = mpsc::channel::<WriteJob>(128);
-        let client = Arc::new(Client { writer,pending:StdMutex::new(HashMap::new()),approvals:StdMutex::new(HashMap::new()),active:StdMutex::new(HashMap::new()),unmaterialized:StdMutex::new(HashMap::new()),archived:StdMutex::new(HashSet::new()),resume_lock:Mutex::new(()),start_locks:StdMutex::new(HashMap::new()),ended:CancellationToken::new() });
+        let client = Arc::new(Client { writer,pending:StdMutex::new(HashMap::new()),approvals:StdMutex::new(HashMap::new()),active:StdMutex::new(HashMap::new()),unmaterialized:StdMutex::new(HashMap::new()),archived:StdMutex::new(HashSet::new()),resume_lock:Mutex::new(()),start_locks:StdMutex::new(HashMap::new()),ended:CancellationToken::new(),process_exited:CancellationToken::new() });
         // Initialization cancellation must terminate the process before it is published.
         let startup = client.ended.clone().drop_guard();
         let writer_stop = client.ended.clone();
@@ -176,7 +186,9 @@ impl Codex {
             let _ = events.send(json!({"method":"relay/codexExited","params":{"reason":if result.is_ok() {"Codex 进程已退出"} else {"Codex 协议流异常，请检查版本兼容性"}}}));
         });
         let stop = client.ended.clone();
+        let exited = client.process_exited.clone();
         tokio::spawn(async move {
+            let _exited = exited.drop_guard();
             tokio::select! { _ = stop.cancelled() => { let _ = child.kill().await; }, _ = child.wait() => { stop.cancel(); } }
         });
         let initialized = client.request("initialize", json!({"clientInfo":{"name":"agent_relay","title":"Relay","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true,"requiredHumanApproval":true}})).await;
@@ -419,7 +431,7 @@ mod tests {
             writer, pending: StdMutex::new(HashMap::new()), approvals: StdMutex::new(HashMap::new()),
             active: StdMutex::new(HashMap::new()), unmaterialized: StdMutex::new(HashMap::new()),
             archived: StdMutex::new(HashSet::new()), resume_lock: Mutex::new(()),
-            start_locks: StdMutex::new(HashMap::new()), ended: CancellationToken::new(),
+            start_locks: StdMutex::new(HashMap::new()), ended: CancellationToken::new(), process_exited: CancellationToken::new(),
         })
     }
 
