@@ -5,6 +5,7 @@
 /src-tauri/gen/
 /workers/relay/node_modules/
 /workers/relay/.wrangler/
+/workers/relay/wrangler.local.toml
 *.log
 *.tsbuildinfo
 .env

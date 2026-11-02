@@ -10,13 +10,16 @@
 cd workers/relay
 npm install
 npx wrangler login
+Copy-Item wrangler.toml wrangler.local.toml
+# 编辑 wrangler.local.toml，填写自己的域名，再执行部署。
 npm run deploy
 ```
 
 部署入口和配置：
 
 - `src/index.ts`：Worker 路由和 `RelayRoom` Durable Object。
-- `wrangler.toml`：默认名称 `agent-relay`，绑定名 `RELAY_ROOM`，迁移标签 `v1`。
+- `wrangler.toml`：通用配置模板，默认名称 `agent-relay`，绑定名 `RELAY_ROOM`，迁移标签 `v1`。
+- `wrangler.local.toml`：实际部署配置，已被 Git 忽略；个人域名等部署信息只放在这里。`npm run deploy` 使用此文件。已有本地配置时无需再次复制。
 - 无数据库密码、模型密钥或 Codex 登录凭据需要上传。
 - 默认关闭 Workers 应用观测日志；账号级网络／访问日志由你的 Cloudflare 配置决定。
 
@@ -30,13 +33,13 @@ https://agent-relay.<your-subdomain>.workers.dev
 
 ## 自定义域名
 
-若默认域名在两端网络间不可达，可以在 Cloudflare 托管的域名下配置自定义子域名，并使用该 HTTPS 根地址。在 `wrangler.toml` 中配置：
+若默认域名在两端网络间不可达，可以在 Cloudflare 托管的域名下配置自定义子域名，并使用该 HTTPS 根地址。在未跟踪的 `wrangler.local.toml` 中配置：
 
 ```toml
 routes = [{ pattern = "relay.example.com", custom_domain = true }]
 ```
 
-该配置应位于文件顶层，在 `[durable_objects]` 之前。重新部署后，为新的配对邀请使用新域名。当前已配对设备的端点不跟随默认中继设置自动迁移。
+该配置应位于文件顶层，在 `[durable_objects]` 之前，并取消模板中的注释。若只使用默认域名，在本地配置中设置 `workers_dev = true`。实际域名不应提交到仓库或写入公开发布说明。重新部署后，为新的配对邀请使用新域名。当前已配对设备的端点不跟随默认中继设置自动迁移。
 
 ## 传输协议
 
