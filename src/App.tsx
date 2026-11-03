@@ -3,7 +3,7 @@ import { Activity, AlertCircle, Archive, ArchiveRestore, ArrowUp, ChevronDown, C
 import { command, desktop, message, stateLabels, subscribe, title, when, type Device, type Json, type Snapshot } from "./api";
 import { useWorkbench } from "./workbench";
 import { updateProgress, useUpdates } from "./updates";
-import { groupProjectThreads, type ProjectGroup } from "./projects";
+import { groupProjectThreads, type CodexProject, type ProjectGroup } from "./projects";
 import { WindowTitlebar } from "./WindowTitlebar";
 import { MentionComposer } from "./MentionComposer";
 import { EMPTY_DRAFT, type ComposerDraft } from "./mentions";
@@ -30,10 +30,10 @@ export default function App() {
   const updates = useUpdates();
   const [deviceId, setDeviceId] = useState("local");
   const [dialog, setDialog] = useState<Dialog>(null);
-  const [newThreadCwd, setNewThreadCwd] = useState<string | undefined>();
-  const [newThreadProjectId, setNewThreadProjectId] = useState<string | undefined>();
+  const [creatingProjectKey, setCreatingProjectKey] = useState<string | null>(null);
+  const creatingThread = useRef(false);
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
-  const beginNewThread = useCallback((cwd?: string, projectId?: string) => { setNewThreadCwd(cwd); setNewThreadProjectId(projectId); setDialog("new"); }, []);
+  const beginNewThread = useCallback(() => setDialog("new"), []);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [reference, setReference] = useState<MessageReference | null>(null);
   const [referenceCopied, setReferenceCopied] = useState(false);
@@ -221,6 +221,20 @@ export default function App() {
     await action("set_sharing", { enabled: !snapshot?.settings.sharing });
     setSharingBusy(false);
   };
+  const createThread = async (cwd: string, project?: CodexProject) => {
+    if (creatingThread.current) throw new Error("正在创建会话，请稍候");
+    if (project && !project.native) throw new Error("此版本 Codex 不支持保存原生项目归属，请升级 Codex 后在项目中新建会话。");
+    const target = deviceId;
+    creatingThread.current = true;
+    setCreatingProjectKey(projectKey(target, project?.id || "unassigned"));
+    try {
+      await workbench.create(cwd, model, target, project?.id);
+      setCollapsedProjects(previous => { const next = { ...previous, [projectKey(target, project?.id || "unassigned")]: false }; if (project) for (const root of project.rootPaths) delete next[projectKey(target, root)]; return next; });
+    } finally {
+      creatingThread.current = false;
+      setCreatingProjectKey(null);
+    }
+  };
   const approvalForThread = workbench.requests.filter(request => !request.params?.threadId || request.params.threadId === workbench.selected);
   const renderProjectGroups = (groups: ProjectGroup[], archived: boolean) => groups.map(group => {
     const { threads } = group;
@@ -234,7 +248,7 @@ export default function App() {
         <button className="project-toggle" title={group.rootPaths.length ? `${group.name}\n${group.rootPaths.join("\n")}` : "未归属于 Codex 项目的会话"} aria-expanded={!collapsed} aria-controls={listId} onClick={() => setCollapsedProjects(previous => { const next = { ...previous, [key]: !collapsed }; if (!archived) for (const root of group.rootPaths) delete next[projectKey(deviceId, root)]; return next; })}>
           <ChevronRight size={12} className={collapsed ? "" : "expanded"} /><Folder size={13} /><span className="project-name">{group.name}</span><span className="project-count" title="当前已加载的会话数量">{threads.length}</span>
         </button>
-        {!archived && group.project && cwd && <button className="icon-button project-new" title={`在 ${group.name} 中新建会话`} aria-label={`在 ${group.name} 中新建会话`} disabled={!available} onClick={() => beginNewThread(cwd, group.id)}><Plus size={14} /></button>}
+        {!archived && group.project && cwd && <button className="icon-button project-new" title={!group.project.native ? "此版本 Codex 不支持保存原生项目归属，请升级后新建会话" : creatingProjectKey === key ? "正在创建会话…" : `在 ${group.name} 中新建会话`} aria-label={`在 ${group.name} 中新建会话`} aria-busy={creatingProjectKey === key} disabled={!available || creatingProjectKey !== null || !group.project.native || workbench.environment?.installed === false || signedOut} onClick={() => { setError(""); void createThread(cwd, group.project).catch(error => setError(message(error))); }}>{creatingProjectKey === key ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}</button>}
       </div>
       <div id={listId} hidden={collapsed}>{threads.map(thread => {
         const busy = workbench.isArchiveBusy(thread.id);
@@ -344,11 +358,7 @@ export default function App() {
     {dialog === "pair" && <PairDialog snapshot={snapshot} close={() => setDialog(null)} changed={refresh} />}
     {dialog === "settings" && <SettingsDialog snapshot={snapshot} updates={updates} close={() => setDialog(null)} changed={async () => { await refresh(); workbench.refresh(); }} />}
     {dialog === "diagnostics" && <DiagnosticsDialog snapshot={snapshot} close={() => setDialog(null)} />}
-    {dialog === "new" && <NewThreadDialog key={deviceId} projects={projects} initialCwd={newThreadCwd} initialProjectId={newThreadProjectId} deviceName={deviceName} close={() => setDialog(null)} create={async (cwd, project) => {
-      const target = deviceId;
-      await workbench.create(cwd, model, target, project?.native ? project.id : undefined);
-      setCollapsedProjects(previous => { const next = { ...previous, [projectKey(target, project?.id || "unassigned")]: false }; if (project) for (const root of project.rootPaths) delete next[projectKey(target, root)]; return next; });
-    }} />}
+    {dialog === "new" && <NewThreadDialog key={deviceId} projects={projects} deviceName={deviceName} close={() => setDialog(null)} create={createThread} />}
     {dialog === "help" && <Modal title="使用帮助" close={() => setDialog(null)}><div className="help-steps"><p><strong>1. 准备 Codex</strong><br />两台电脑安装 Relay 和 Codex，并分别完成本机登录。</p><p><strong>2. 创建并加入邀请</strong><br />选择“添加设备”。同一网络使用局域网地址，异地连接使用已部署的 Workers 中继。</p><p><strong>3. 双方确认并启用共享</strong><br />核对设备身份，分别确认配对，并打开需要被访问的电脑的共享开关。</p><p><strong>4. 选择执行电脑</strong><br />设备栏切换电脑，选择或新建会话。每次发送前可在工具栏确认执行位置。</p><p className="muted micro">网络恢复后重新读取会话。Relay 不会自动重发任务或审批，也不接管其他 Codex 进程中的活跃任务。{modifier}+K 搜索，{modifier}+N 新建，{modifier}+, 设置。</p></div></Modal>}
     {reference && <Modal title={reference.label} subtitle={referenceKind(reference.href) === "thread" ? "此引用来自另一台 Codex 主机，当前设备无法直接打开。" : "消息中引用的" + (referenceLabels[referenceKind(reference.href) || ""] || "资源")} close={() => setReference(null)} footer={<button className="secondary full" onClick={() => { void copy(reference.href).then(() => setReferenceCopied(true)).catch(error => setError(message(error))); }}>{referenceCopied ? "已复制引用地址" : "复制引用地址"}</button>}><div className="settings-group"><div className="info-row"><span>名称</span><strong className="info-value">{reference.label}</strong></div><div className="info-row"><span>地址</span><span className="info-value mono">{reference.href}</span></div></div></Modal>}
     {details && <DeviceDialog key={details.id} device={details} close={() => setDetailId(null)} changed={() => refresh()} />}
