@@ -308,7 +308,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
             if (seenCursors.has(cursor)) throw new Error("Codex 返回了重复的历史分页游标");
             seenCursors.add(cursor);
           }
-          const page = await call(target, "thread/turns/list", { threadId: id, limit: 20, sortDirection: "desc", itemsView: "full", ...(cursor ? { cursor } : {}) });
+          const page: Json = await call(target, "thread/turns/list", { threadId: id, limit: 20, sortDirection: "desc", itemsView: "full", ...(cursor ? { cursor } : {}) });
           if (!current()) return;
           if (!Array.isArray(page.data)) throw new Error("Codex 返回了无效的回合列表");
           turns.push(...page.data);
