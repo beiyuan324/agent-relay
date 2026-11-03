@@ -360,6 +360,8 @@ a.message-reference:hover { background: color-mix(in srgb,var(--blue) 20%,var(--
 .activity-panel .activity-command { margin-top: 0; }
 .activity-panel pre.diff { white-space: pre; overflow-wrap: normal; }
 .activity-prompt, .activity-empty, .activity-cwd { color: var(--secondary); }
+.activity-prompt { user-select: none; }
+.activity-prompt::before { content: "$ "; }
 .activity-cwd { font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; user-select: text; }
 .activity-section-label { margin: 10px 0 4px; color: var(--secondary); font-size: 12px; }
 .activity-panel .activity-error { color: var(--error); }

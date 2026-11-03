@@ -7,11 +7,49 @@ function text(value: unknown): string {
 function commandText(item: Json): string {
   return Array.isArray(item.command) ? item.command.join(" ") : text(item.command);
 }
-function shellCommand(command: string): string {
-  const wrapped = /(?:powershell|pwsh)(?:\.exe)?["']?\s+.*?-(?:Command|c)\s+([\s\S]+)$/i.exec(command);
+// Decode one POSIX-quoted argv value, not the PowerShell source inside it.
+// Adjacent fragments such as 'before'"'"'after' represent a literal apostrophe.
+function shellArgument(source: string): string | null {
+  const input = source.trim();
+  if (input[0] !== "'" && input[0] !== '"') return null;
+  let value = "", quote = "";
+  for (let index = 0; index < input.length; index++) {
+    const character = input[index];
+    if (quote === "'") {
+      if (character === "'") quote = "";
+      else value += character;
+    } else if (quote === '"') {
+      if (character === '"') quote = "";
+      else if (character === "\\" && /[$`"\\\n]/.test(input[index + 1] || "")) {
+        const escaped = input[++index];
+        if (escaped !== "\n") value += escaped;
+      } else value += character;
+    } else if (/\s/.test(character)) {
+      // More than one argument means this is not a quoted script payload.
+      return null;
+    } else if (character === "'" || character === '"') quote = character;
+    else if (character === "\\") {
+      if (++index === input.length) return null;
+      if (input[index] !== "\n") value += input[index];
+    } else value += character;
+  }
+  return quote ? null : value;
+}
+function shellCommand(item: Json): string {
+  const command = commandText(item);
+  if (Array.isArray(item.command)) {
+    // Structured argv is already decoded. Joining it first loses that distinction.
+    const executable = item.command[0];
+    if (typeof executable !== "string" || !/(?:^|[\\/])(?:powershell|pwsh)(?:\.exe)?$/i.test(executable)) return command;
+    const commandIndex = item.command.findIndex((argument: unknown) => typeof argument === "string" && /^-(?:Command|c)$/i.test(argument));
+    return commandIndex > 0 && commandIndex < item.command.length - 1 ? item.command.slice(commandIndex + 1).join(" ") : command;
+  }
+  const executable = /^(?:"(?:[^"\r\n]*[\\/])?(?:powershell|pwsh)(?:\.exe)?"|'(?:[^'\r\n]*[\\/])?(?:powershell|pwsh)(?:\.exe)?'|(?:[^\s"']*[\\/])?(?:powershell|pwsh)(?:\.exe)?)\s+/i.exec(command.trim());
+  if (!executable) return command;
+  const wrapped = /^(?:[\s\S]*?\s)?-(?:Command|c)\s+([\s\S]+)$/i.exec(command.trim().slice(executable[0].length));
   if (!wrapped) return command;
   const inner = wrapped[1].trim();
-  return inner.length > 1 && (inner[0] === '"' || inner[0] === "'") && inner[inner.length - 1] === inner[0] ? inner.slice(1, -1) : inner;
+  return shellArgument(inner) ?? inner;
 }
 function toolArguments(item: Json): Json {
   if (item.arguments && typeof item.arguments === "object" && !Array.isArray(item.arguments)) return item.arguments;
@@ -86,7 +124,7 @@ function runningActivityLabel(item: Json): string {
   if (item.type === "commandExecution") {
     const args = toolArguments(item);
     const description = [item.title, args.title, args.description].find(value => typeof value === "string" && value.trim());
-    const command = shellCommand(commandText(item)).trim().replace(/\s+/g, " ");
+    const command = shellCommand(item).trim().replace(/\s+/g, " ");
     return description ? "正在" + description.trim() : "正在运行" + (command ? " " + command : "命令");
   }
   if (item.type === "fileChange") {
@@ -130,7 +168,7 @@ export function ToolActivityGroup({ items, active }: { items: Json[]; active: bo
 export function ToolActivity({ item, active }: { item: Json; active: boolean }) {
   const command = item.type === "commandExecution", files = item.type === "fileChange";
   const { failed, rejected, running, ended, state } = activityState(item, active);
-  const fullCommand = commandText(item), visibleCommand = shellCommand(fullCommand);
+  const fullCommand = commandText(item), visibleCommand = shellCommand(item);
   const summaryCommand = visibleCommand.trim().replace(/\s+/g, " ");
   const commandState = failed ? "运行失败" : running ? "正在运行" : rejected ? "已拒绝" : ended ? "已结束" : item.status === "interrupted" ? "已停止" : "已运行";
   const title = command ? commandState + (summaryCommand ? " " + summaryCommand : "命令")
@@ -151,7 +189,7 @@ export function ToolActivity({ item, active }: { item: Json; active: boolean }) 
     <div className="activity-panel">
       <div className="activity-panel-heading"><span>{command ? "Shell" : files ? "文件变更" : item.server || "工具详情"}</span>{running && <span>进行中</span>}</div>
       {command ? <>
-        <pre className="activity-command"><span className="activity-prompt">$ </span>{visibleCommand || "未提供命令"}</pre>
+        <pre className="activity-command"><span className="activity-prompt" aria-hidden="true" />{visibleCommand || "未提供命令"}</pre>
         {item.cwd && <div className="activity-cwd" title={item.cwd}>{item.cwd}</div>}
         <pre className={!item.aggregatedOutput ? "activity-empty" : undefined}>{text(item.aggregatedOutput) || (running ? "等待输出…" : "无输出")}</pre>
         {visibleCommand !== fullCommand && <details className="activity-raw"><summary>完整启动命令</summary><pre>{fullCommand}</pre></details>}
