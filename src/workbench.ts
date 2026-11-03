@@ -184,16 +184,24 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   }, []);
 
   useEffect(() => {
+    const changedDevice = listDevice.current !== device;
+    if (changedDevice) {
+      listDevice.current = device;
+      const restore = selection.current[device];
+      active.current = { ...active.current, selected: restore?.id || null, archiveExpanded: false };
+      setArchiveExpanded(false);
+      setThreads(Object.entries(newThreads.current).filter(([key]) => JSON.parse(key)[0] === device).map(([, thread]) => thread)); setSelected(restore?.id || null); setEnvironment(null); setModels([]); setPermissions(null); setSearch(""); setNextCursor(null); setOlderCursor(null); setSending(false);
+      setArchivedThreads([]); setArchivedNextCursor(null); setArchivedError("");
+    }
     ++listEpoch.current; ++archivedListEpoch.current; ++openEpoch.current;
-    if (listDevice.current !== device) { listDevice.current = device; active.current.archiveExpanded = false; setArchiveExpanded(false); }
+    flushEvents();
     for (const key of resumed.current) if (JSON.parse(key)[0] === device) resumed.current.delete(key);
     setSessions(previous => Object.fromEntries(Object.entries(previous).map(([key, session]) =>
       [key, JSON.parse(key)[0] === device ? { ...session, ready: false } : session])));
-    const restore = selection.current[device];
-    setThreads(Object.entries(newThreads.current).filter(([key]) => JSON.parse(key)[0] === device).map(([, thread]) => thread)); setSelected(restore?.id || null); setEnvironment(null); setModels([]); setPermissions(null); setSearch(""); setNextCursor(null); setOlderCursor(null); setOpening(false); setSending(false); setLoading(false);
-    setArchivedThreads([]); setArchivedNextCursor(null); setArchivedLoading(false); setArchivedError("");
+    setOpening(false); setLoading(false); setArchivedLoading(false);
     if (!available) return;
-    if (restore) void open(restore.id, restore.archived);
+    const restore = selection.current[device];
+    if (restore) void open(restore.id, restore.archived, { preserveHistory: !changedDevice });
     let stopped = false;
     const target = device;
     const refresh = refreshTargets.current.delete(target);
@@ -224,7 +232,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       }
     });
     return () => { stopped = true; if (approvalUpdates.current[target] === pendingUpdates) delete approvalUpdates.current[target]; };
-  }, [device, available, environmentRevision]);
+  }, [device, available, environmentRevision, flushEvents]);
 
   useEffect(() => {
     if (!available) return;
@@ -235,13 +243,12 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   useEffect(() => {
     ++archivedListEpoch.current;
     setArchivedLoading(available && archiveExpanded); setArchivedError("");
-    setArchivedThreads([]); setArchivedNextCursor(null);
     if (!available || !archiveExpanded) return;
     const timer = window.setTimeout(() => { void fetchList(null, search.trim(), true); }, 250);
     return () => window.clearTimeout(timer);
   }, [device, available, search, archiveExpanded, listRevision, fetchList, environmentRevision]);
 
-  const open = useCallback(async (id: string, archivedHint?: boolean) => {
+  const open = useCallback(async (id: string, archivedHint?: boolean, options: { preserveHistory?: boolean } = {}) => {
     const target = active.current.device;
     if (!active.current.available) return;
     flushEvents();
@@ -249,15 +256,20 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     if (archiveMutations.current.has(key)) return;
     const archived = archivedHint ?? archiveFlags.current[key] ?? false;
     if (archiveFlags.current[key] !== undefined && archiveFlags.current[key] !== archived) return;
+    const preserveHistory = !!options.preserveHistory && !!cached.current[key];
+    const retainedTurns: Json[] = preserveHistory ? cached.current[key].turns || [] : [];
+    const retainedIds = new Set(retainedTurns.map(turn => turn.id));
     const epoch = ++openEpoch.current;
+    const current = () => epoch === openEpoch.current && target === active.current.device && active.current.available;
     const startedAt = sequence.current;
     selection.current[target] = { id, archived };
     resumed.current.delete(key);
     setSessions(previous => ({ ...previous, [key]: { ready: false } }));
     active.current = { ...active.current, selected: id };
-    setSelected(id); setOpening(true); setPermissions(null); setOlderCursor(null);
+    setSelected(id); setOpening(true);
+    if (!preserveHistory) { setPermissions(null); setOlderCursor(null); }
     const summary = (archived ? archivedListed.current : listed.current).find(thread => thread.id === id);
-    setCache(previous => ({ ...previous, [key]: { ...summary, ...previous[key], id, relayArchived: archived, turns: previous[key]?.turns || [] } }));
+    if (!preserveHistory) setCache(previous => ({ ...previous, [key]: { ...summary, ...previous[key], id, relayArchived: archived, turns: previous[key]?.turns || [] } }));
     try {
       let result: Json | undefined;
       let resumeError = "", historyError = "";
@@ -265,7 +277,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         result = await call(target, archived ? "thread/read" : "thread/resume", { threadId: id, ...(archived ? { includeTurns: false } : {}) });
         if (!result?.thread) throw new Error("Codex 返回了无效的会话数据，请检查版本兼容性");
       } catch (error) { result = undefined; if (!archived) resumeError = message(error); }
-      if (epoch !== openEpoch.current || target !== active.current.device) return;
+      if (!current()) return;
       let thread: Json = result?.thread || { ...summary, id };
       let cursor: string | null = null;
       if (result?.relayHistoryPending === true) {
@@ -287,12 +299,25 @@ export function useWorkbench(device: string, available: boolean, onError: (error
           if (history.thread) thread = history.thread;
         } catch { /* The history page or full read below can still succeed. */ }
       }
+      if (!current()) return;
       try {
-        const page = await call(target, "thread/turns/list", { threadId: id, limit: 20, sortDirection: "desc", itemsView: "full" });
-        if (!Array.isArray(page.data)) throw new Error("Codex 返回了无效的回合列表");
-        thread = { ...thread, turns: [...page.data].reverse() };
-        cursor = page.nextCursor || null;
+        const turns: Json[] = [];
+        const seenCursors = new Set<string>();
+        do {
+          if (cursor) {
+            if (seenCursors.has(cursor)) throw new Error("Codex 返回了重复的历史分页游标");
+            seenCursors.add(cursor);
+          }
+          const page = await call(target, "thread/turns/list", { threadId: id, limit: 20, sortDirection: "desc", itemsView: "full", ...(cursor ? { cursor } : {}) });
+          if (!current()) return;
+          if (!Array.isArray(page.data)) throw new Error("Codex 返回了无效的回合列表");
+          turns.push(...page.data);
+          cursor = page.nextCursor || null;
+          if (!retainedIds.size || page.data.some((turn: Json) => retainedIds.has(turn.id))) break;
+        } while (cursor);
+        thread = { ...thread, turns: turns.reverse() };
       } catch (pageError) {
+        if (!current()) return;
         try {
           const history = await call(target, "thread/read", { threadId: id, includeTurns: true });
           if (!Array.isArray(history.thread?.turns)) throw new Error("Codex 未返回会话历史");
@@ -301,22 +326,25 @@ export function useWorkbench(device: string, available: boolean, onError: (error
           historyError = `无法更新历史：${message(pageError)}；完整历史读取：${message(error)}。当前内容可能不完整。`;
         }
       }
-      if (epoch !== openEpoch.current || target !== active.current.device) return;
+      if (!current()) return;
       flushEvents();
       const touched = new Set(Object.entries(events.current[key]?.turns || {}).filter(([, updated]) => updated > startedAt).map(([id]) => id));
       // Merge live snapshots; replaying deltas onto a fetched snapshot can duplicate text.
+      const refreshedIds = new Set((thread.turns || []).map((turn: Json) => turn.id));
+      const overlap = retainedTurns.findIndex(turn => refreshedIds.has(turn.id));
+      const retainedPrefix = preserveHistory && !historyError ? retainedTurns.slice(0, overlap < 0 ? retainedTurns.length : overlap) : [];
       setCache(previous => {
-        const history = { ...previous[key], ...thread, turns: historyError ? previous[key]?.turns || thread.turns || [] : thread.turns || [] };
+        const history = { ...previous[key], ...thread, turns: historyError ? previous[key]?.turns || thread.turns || [] : [...retainedPrefix, ...(thread.turns || [])] };
         return { ...previous, [key]: { ...mergeLive(history, previous[key], touched), interrupted: false, relayArchived: archived } };
       });
       if (result && !archived) {
         resumed.current.add(key);
         setPermissions({ approvalPolicy: result.approvalPolicy, sandbox: result.sandbox, model: result.model, reasoningEffort: result.reasoningEffort });
       }
-      setOlderCursor(cursor);
+      if (!preserveHistory || (!historyError && overlap < 0)) setOlderCursor(cursor);
       setSessions(previous => ({ ...previous, [key]: { ready: !!result && !archived, resumeError, historyError } }));
     } catch (error) {
-      if (epoch === openEpoch.current && target === active.current.device) {
+      if (current()) {
         setCache(previous => ({ ...previous, [key]: previous[key] || { ...summary, id, turns: [] } }));
         setSessions(previous => ({ ...previous, [key]: { ready: false, ...(archived ? { historyError: message(error) } : { resumeError: message(error) }) } }));
       }
@@ -518,7 +546,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   };
   const thread = selected ? cache[keyOf(device, selected)] : undefined;
   const session = selected ? sessions[keyOf(device, selected)] : undefined;
-  const ready = !!session?.ready;
+  const ready = available && !!session?.ready;
   const activeTurn = [...(thread?.turns || [])].reverse().find((turn: Json) => turn.status === "inProgress");
   const stop = async () => {
     if (!selected || !available || !resumed.current.has(keyOf(device, selected)) || !activeTurn?.id) return;
@@ -557,7 +585,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   };
   return {
     threads, selected, thread, models, environment, permissions, requests: requests[device] || [],
-    projectCatalog: projectState.device === device && available ? projectState.value : EMPTY_PROJECT_CATALOG,
+    projectCatalog: projectState.device === device ? projectState.value : EMPTY_PROJECT_CATALOG,
     projectsLoading, projectsError,
     archivedThreads, archivedNextCursor, archivedLoading, archivedError, archiveExpanded, toggleArchive,
     changeArchive, archiveReason,

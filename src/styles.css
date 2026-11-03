@@ -219,6 +219,9 @@ input::placeholder,textarea::placeholder { color: var(--tertiary); }
 .execution-device { display: flex; align-items: center; gap: 6px; min-height: 32px; border: 1px solid var(--line); padding: 6px 8px; border-radius: 16px; color: var(--secondary); font-size: 12px; }
 .execution-device span:not(.status-dot) { max-width: 105px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .execution-device .status-dot { width: 5px; height: 5px; margin-right: 1px; }
+.execution-device.is-offline { color: var(--warning); border-color: color-mix(in srgb,var(--warning) 35%,var(--line)); }
+.execution-connection { flex-shrink: 0; }
+.connection-offline { color: var(--warning); }
 .workspace-content { position: relative; flex: 1; min-height: 0; display: flex; overflow: hidden; }
 .conversation-column { --scroll-inset: calc(var(--content-gutter) - var(--scrollbar-size)); flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; position: relative; }
 .preview-banner, .error-banner { display: flex; align-items: flex-start; gap: 8px; padding: 8px var(--content-gutter); line-height: 1.8; font-size: 12px; border-bottom: 1px solid var(--line); flex-shrink: 0; max-height: 128px; overflow-y: auto; overflow-wrap: anywhere; }

@@ -92,7 +92,7 @@ const Turn = memo(function Turn({ turn, running }: { turn: Json; running: boolea
   const active = running && turn.status === "inProgress";
   const [expanded, setExpanded] = useState(active);
   const [now, setNow] = useState(Date.now);
-  useEffect(() => { setExpanded(active); }, [active]);
+  useEffect(() => { if (turn.status !== "inProgress") setExpanded(false); }, [turn.status]);
   useEffect(() => {
     if (!active) return;
     setNow(Date.now());
@@ -113,7 +113,7 @@ const Turn = memo(function Turn({ turn, running }: { turn: Json; running: boolea
   const results = items.filter(item => answers.has(item));
   const elapsed = elapsedTime(turn, active, now);
   const duration = elapsed.ms == null ? "用时未知" : `${elapsed.estimated ? "约 " : ""}${formatElapsed(elapsed.ms)}`;
-  const label = active ? `处理中${elapsed.ms == null ? "" : ` · ${duration}`}` : elapsed.ms == null ? "处理过程 · 用时未知" : `用时 ${duration}`;
+  const label = turn.status === "inProgress" && !running ? "状态待同步" : active ? `处理中${elapsed.ms == null ? "" : ` · ${duration}`}` : elapsed.ms == null ? "处理过程 · 用时未知" : `用时 ${duration}`;
   const timingHint = elapsed.ms == null ? "此记录未提供完整计时数据" : elapsed.estimated ? "按本次连接收到的开始和结束时间估算" : "使用会话返回的处理用时";
   return <section className="turn">
     {users.map(item => <Item key={item.id} item={item} />)}
@@ -128,7 +128,7 @@ const Turn = memo(function Turn({ turn, running }: { turn: Json; running: boolea
     {turn.status === "interrupted" && <div className="turn-note">此回合已停止或连接已结束。</div>}
   </section>;
 });
-export function Transcript({ thread, running, older, hasOlder, loading }: { thread: Json; running: boolean; older: () => void; hasOlder: boolean; loading: boolean }) {
+export function Transcript({ thread, running, older, hasOlder, loading, offline = false }: { thread: Json; running: boolean; older: () => void; hasOlder: boolean; loading: boolean; offline?: boolean }) {
   const bottom = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const scroll = useRef<HTMLDivElement>(null);
@@ -138,7 +138,7 @@ export function Transcript({ thread, running, older, hasOlder, loading }: { thre
   useEffect(() => { follow.current = true; bottom.current?.scrollIntoView({ block: "end" }); }, [thread.id]);
   return <div className="transcript" ref={scroll} onScroll={() => { const el = scroll.current; if (el) follow.current = el.scrollHeight - el.clientHeight - el.scrollTop < 160; }}>
     <div className="transcript-inner">
-      {hasOlder && <button className="load-older" disabled={loading} onClick={() => { follow.current = false; older(); }}>{loading ? "正在读取…" : "加载更早的回合"}</button>}
+      {hasOlder && <button className="load-older" disabled={offline || loading} title={offline ? "连接恢复后可加载更早的回合" : undefined} onClick={() => { follow.current = false; older(); }}>{loading ? "正在读取…" : "加载更早的回合"}</button>}
       {(thread.turns || []).map((turn: Json) => <Turn key={`${thread.id}:${turn.id}`} turn={turn} running={running && turn.status === "inProgress"} />)}
       {running && !(thread.turns || []).some((turn: Json) => turn.status === "inProgress") && <div className="working-indicator"><span className="pulse-dot" />Codex 正在处理</div>}
       {thread.interrupted && <div className="inline-error"><AlertCircle size={15} />进程连接已结束，请刷新会话确认最终状态。</div>}
