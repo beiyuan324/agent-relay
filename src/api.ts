@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { messagePreview } from "./message-text";
 
 export type Json = Record<string, any>;
 export interface Identity { id: string; name: string; platform: string }
@@ -30,7 +31,7 @@ export const stateLabels: Record<string, string> = {
   connected: "已连接", pending: "等待配对确认", connecting: "正在连接", handshaking: "正在验证设备身份", waiting: "等待设备加入",
   offline: "未连接", replaced: "连接已被替换", credentialMissing: "需要重新配对",
 };
-export function title(thread: Json) { return thread.name || thread.title || thread.preview?.slice(0, 64) || "新会话"; }
+export function title(thread: Json) { return thread.name || thread.title || messagePreview(thread.preview || "").slice(0, 64) || "新会话"; }
 export function folder(path = "") { return path.replace(/\\/g, "/").split("/").filter(Boolean).pop() || "未指定项目"; }
 export function when(value: number | string | undefined) {
   if (!value) return "";

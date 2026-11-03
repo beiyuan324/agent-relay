@@ -1,43 +1,67 @@
-import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import { createContext, memo, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AlertCircle, Check, ChevronDown, ChevronRight, FileCode2, ListChecks, Loader2, Terminal, Wrench, X } from "lucide-react";
+import { AlertCircle, Blocks, ChevronDown, ChevronRight, FileCode2, ListChecks, Loader2, MessageSquare, X } from "lucide-react";
 import type { Json } from "./api";
+import { messageBody, messageLinks, referenceKind, type MessageReference } from "./message-text";
+import { ToolActivity } from "./ToolActivity";
 export { Approval } from "./Approval";
 
+const ReferenceContext = createContext<((reference: MessageReference) => void) | undefined>(undefined);
+function ReferenceLink({ href, label, children }: MessageReference & { children?: ReactNode }) {
+  const open = useContext(ReferenceContext);
+  const kind = referenceKind(href);
+  if (!kind) return href && defaultUrlTransform(href) ? <a href={href} target="_blank" rel="noreferrer noopener">{children || label}</a> : <>{children || label}</>;
+  if (kind === "web") return <a className="message-link" href={href} target="_blank" rel="noreferrer noopener">{children || label}</a>;
+  const icon = kind === "thread" ? <MessageSquare size={13} aria-hidden="true" /> : kind === "plugin" || kind === "app" ? <Blocks size={13} aria-hidden="true" /> : <FileCode2 size={13} aria-hidden="true" />;
+  const content = <>{icon}<span>{children || label}</span></>;
+  if (!open) return <span className="message-reference" title={href}>{content}</span>;
+  return <a className="message-reference" href={href} title={kind === "thread" ? "打开引用会话：" + label : "查看引用：" + label} onClick={event => { event.preventDefault(); open({ href, label }); }}>{content}</a>;
+}
+function linkedText(text: string, key: string): ReactNode[] {
+  return messageLinks(text).map((part, index) => typeof part === "string" ? part : <ReferenceLink key={key + ":" + index} {...part} />);
+}
 function Markdown({ text }: { text: string }) {
-  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{ a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener">{children}</a> }}>{text}</ReactMarkdown></div>;
+  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml
+    urlTransform={url => referenceKind(url) ? url : defaultUrlTransform(url)}
+    components={{ a: ({ children, href }) => <ReferenceLink href={href || ""} label={typeof children === "string" ? children : href || "引用"}>{children}</ReferenceLink> }}>{text}</ReactMarkdown></div>;
 }
 function output(value: unknown): string {
   return typeof value === "string" ? value : value == null ? "" : JSON.stringify(value, null, 2);
 }
 function UserText({ part }: { part: Json }) {
   const text = part.text as string;
+  const body = messageBody(text);
   const elements = part.text_elements || part.textElements;
-  if (!Array.isArray(elements) || !elements.length) return <span>{text}</span>;
-  const bytes = new TextEncoder().encode(text), decoder = new TextDecoder(), content: ReactNode[] = [];
-  const ranges = [...elements].sort((a, b) => (a.byte_range || a.byteRange)?.start - (b.byte_range || b.byteRange)?.start);
-  let cursor = 0;
+  const encoder = new TextEncoder(), bytes = encoder.encode(text), decoder = new TextDecoder(), content: ReactNode[] = [];
+  const ranges: Json[] = Array.isArray(elements) ? [...elements].sort((a, b) => (a.byte_range || a.byteRange)?.start - (b.byte_range || b.byteRange)?.start) : [];
+  // Ranges refer to the original UTF-8 message, including any hidden context.
+  let cursor = encoder.encode(text.slice(0, body.offset)).length;
   for (const element of ranges) {
     const range = element.byte_range || element.byteRange;
     if (!range || !Number.isInteger(range.start) || !Number.isInteger(range.end) || range.start < cursor || range.end <= range.start || range.end > bytes.length) continue;
-    if (range.start > cursor) content.push(decoder.decode(bytes.subarray(cursor, range.start)));
+    if (range.start > cursor) content.push(...linkedText(decoder.decode(bytes.subarray(cursor, range.start)), "text:" + cursor));
     const literal = decoder.decode(bytes.subarray(range.start, range.end));
-    content.push(<span className="message-mention" key={range.start} title={literal}>{typeof element.placeholder === "string" ? element.placeholder : literal}</span>);
+    const links = messageLinks(literal);
+    const link = links.length === 1 && typeof links[0] !== "string" ? links[0] : null;
+    const label = typeof element.placeholder === "string" ? element.placeholder : link?.label || literal;
+    const binding = (part.bindings as Json[] | undefined)?.find(binding => label === "@" + binding.name || label === "$" + binding.name);
+    const reference = link ? { ...link, label } : binding?.path && referenceKind(binding.path) ? { href: binding.path as string, label } : null;
+    content.push(reference ? <ReferenceLink key={range.start} {...reference} /> : <span className="message-mention" key={range.start} title={literal}>{label}</span>);
     cursor = range.end;
   }
-  if (cursor < bytes.length) content.push(decoder.decode(bytes.subarray(cursor)));
-  return <span>{content}</span>;
+  if (cursor < bytes.length) content.push(...linkedText(decoder.decode(bytes.subarray(cursor)), "text:" + cursor));
+  return <div className="user-text-part">{content}{body.context && <details className="message-context"><summary>引用上下文</summary><pre>{body.context}</pre></details>}</div>;
 }
-const Item = memo(function Item({ item }: { item: Json }) {
+const Item = memo(function Item({ item, active = false }: { item: Json; active?: boolean }) {
   switch (item.type) {
     case "userMessage": {
       const content: Json[] = item.content || [];
       const richText = content.some(part => part.text_elements?.length || part.textElements?.length);
       const text = content.map(part => part.text || "").join("\n");
       return <div className="message user-message"><div className="message-label">你</div><div className="user-bubble">{content.map((part, i) => {
-        if (typeof part.text === "string") return <UserText key={i} part={part} />;
-        if (part.type === "mention" || part.type === "skill") return richText || text.includes("@" + part.name) || text.includes("$" + part.name) ? null : <span className="message-mention" key={i} title={part.path}>@{part.name}</span>;
+        if (typeof part.text === "string") return <UserText key={i} part={{ ...part, bindings: content.filter(binding => binding.type === "mention" || binding.type === "skill") }} />;
+        if (part.type === "mention" || part.type === "skill") return richText || text.includes("@" + part.name) || text.includes("$" + part.name) ? null : <ReferenceLink key={i} href={part.path || ""} label={(part.type === "skill" ? "$" : "@") + part.name} />;
         return <span className="muted" key={i}>[{part.type || "附件"}]</span>;
       })}</div></div>;
     }
@@ -46,21 +70,13 @@ const Item = memo(function Item({ item }: { item: Json }) {
     case "plan":
       return <section className="message plan-message" aria-label="Codex 计划"><div className="message-label"><ListChecks size={15} />计划</div><Markdown text={typeof item.text === "string" ? item.text : ""} /></section>;
     case "reasoning": {
-      const text = item.text || [...(item.summary || []), ...(item.content || [])].map((entry: string | Json) => typeof entry === "string" ? entry : entry.text || "").join("\n");
-      return text ? <details className="reasoning"><summary><ChevronDown size={13} />思考过程</summary><Markdown text={text} /></details> : null;
+      const summaries = (item.summary || []).map((entry: string | Json) => typeof entry === "string" ? entry : entry.text || "");
+      const text = item.text || [...summaries, ...(item.content || []).map((entry: string | Json) => typeof entry === "string" ? entry : entry.text || "")].join("\n");
+      const heading = (summaries.find((entry: string) => entry.trim()) || text).split(/\r?\n/).find((line: string) => line.trim())?.replace(/[*\u0060#]/g, "").trim() || "思考过程";
+      return text ? <details className="reasoning"><summary title={heading}><span className="reasoning-title">{heading}</span><ChevronDown size={12} className="activity-chevron" /></summary><div className="reasoning-body"><Markdown text={text} /></div></details> : null;
     }
-    case "commandExecution":
-      return <details className="tool-card" open={item.status === "inProgress"}><summary><Terminal size={14} /><span className="tool-title">{item.command || "执行命令"}</span><span className="tool-status">{item.status === "inProgress" ? <Loader2 size={13} className="spin" /> : item.exitCode === 0 ? <Check size={13} /> : item.exitCode != null ? `退出 ${item.exitCode}` : item.status}</span></summary><div className="tool-body"><div className="micro muted">{item.cwd}</div><pre>{item.aggregatedOutput || "等待命令输出…"}</pre></div></details>;
-    case "fileChange":
-      return <details className="tool-card"><summary><FileCode2 size={14} /><span className="tool-title">文件变更 · {item.changes?.length || 0}</span><span className="tool-status">{item.status === "completed" ? <Check size={13} /> : item.status}</span></summary><div className="tool-body">{(item.changes || []).map((change: Json, i: number) => <div key={i}><div className="file-path">{change.path}</div><pre className="diff">{change.diff || output(change.kind)}</pre></div>)}</div></details>;
-    case "mcpToolCall":
-    case "dynamicToolCall":
-    case "webSearch":
-    case "imageView":
-    case "collabAgentToolCall":
-      return <details className="tool-card"><summary><Wrench size={14} /><span className="tool-title">{item.tool || item.query || item.type}{item.server ? ` · ${item.server}` : ""}</span><span className="tool-status">{item.status}</span></summary><div className="tool-body"><pre>{output(item.arguments || item.action || item.path)}</pre><pre>{output(item.result || item.error)}</pre></div></details>;
     default:
-      return <details className="tool-card"><summary><Wrench size={14} /><span className="tool-title">{item.type || "执行事件"}</span></summary><div className="tool-body"><pre>{output(item)}</pre></div></details>;
+      return <ToolActivity item={item} active={active} />;
   }
 });
 function finiteMilliseconds(value: unknown): number | null {
@@ -119,7 +135,7 @@ const Turn = memo(function Turn({ turn, running }: { turn: Json; running: boolea
     {users.map(item => <Item key={item.id} item={item} />)}
     {process.length > 0 ? <details className="turn-process" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
       <summary className="turn-process-summary" title={`${timingHint}；点击展开或收起处理过程`}><span>{active && <Loader2 size={14} className="spin" />}{label}</span><ChevronRight size={14} className="turn-process-chevron" /></summary>
-      {expanded && <div className="turn-process-body">{process.map(item => <Item key={item.id} item={item} />)}</div>}
+      {expanded && <div className="turn-process-body">{process.map(item => <Item key={item.id} item={item} active={active} />)}</div>}
     </details> : <div className="turn-duration" title={timingHint}>{active && <Loader2 size={14} className="spin" />}{label}</div>}
     {results.map(item => <Item key={item.id} item={item} />)}
     {turn.status === "completed" && !results.length && !!process.length && <div className="turn-note">此回合没有最终答复，可展开处理过程查看。</div>}
@@ -128,7 +144,7 @@ const Turn = memo(function Turn({ turn, running }: { turn: Json; running: boolea
     {turn.status === "interrupted" && <div className="turn-note">此回合已停止或连接已结束。</div>}
   </section>;
 });
-export function Transcript({ thread, running, older, hasOlder, loading }: { thread: Json; running: boolean; older: () => void; hasOlder: boolean; loading: boolean }) {
+export function Transcript({ thread, running, older, hasOlder, loading, onReference }: { thread: Json; running: boolean; older: () => void; hasOlder: boolean; loading: boolean; onReference?: (reference: MessageReference) => void }) {
   const bottom = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const scroll = useRef<HTMLDivElement>(null);
@@ -136,7 +152,7 @@ export function Transcript({ thread, running, older, hasOlder, loading }: { thre
     if (follow.current) bottom.current?.scrollIntoView({ block: "end", behavior: "auto" });
   }, [thread]);
   useEffect(() => { follow.current = true; bottom.current?.scrollIntoView({ block: "end" }); }, [thread.id]);
-  return <div className="transcript" ref={scroll} onScroll={() => { const el = scroll.current; if (el) follow.current = el.scrollHeight - el.clientHeight - el.scrollTop < 160; }}>
+  return <ReferenceContext.Provider value={onReference}><div className="transcript" ref={scroll} onScroll={() => { const el = scroll.current; if (el) follow.current = el.scrollHeight - el.clientHeight - el.scrollTop < 160; }}>
     <div className="transcript-inner">
       {hasOlder && <button className="load-older" disabled={loading} onClick={() => { follow.current = false; older(); }}>{loading ? "正在读取…" : "加载更早的回合"}</button>}
       {(thread.turns || []).map((turn: Json) => <Turn key={`${thread.id}:${turn.id}`} turn={turn} running={running && turn.status === "inProgress"} />)}
@@ -144,7 +160,7 @@ export function Transcript({ thread, running, older, hasOlder, loading }: { thre
       {thread.interrupted && <div className="inline-error"><AlertCircle size={15} />进程连接已结束，请刷新会话确认最终状态。</div>}
       <div ref={bottom} />
     </div>
-  </div>;
+  </div></ReferenceContext.Provider>;
 }
 
 export function Inspector({ thread, close }: { thread: Json | undefined; close: () => void }) {

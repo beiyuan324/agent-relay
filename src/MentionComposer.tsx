@@ -5,7 +5,7 @@ import { call, folder, message, type Json } from "./api";
 import { editDraft, fileTarget, insertMention, matchesMention, mentionTrigger, removeMention, validMentions, type ComposerDraft, type MentionKind, type MentionTarget } from "./mentions";
 
 const labels: Record<MentionKind, string> = { file: "文件", directory: "目录", skill: "技能", app: "应用" };
-const tabs = [{ id: "all", label: "全部" }, { id: "files", label: "文件" }, { id: "skills", label: "技能" }, { id: "apps", label: "应用" }] as const;
+const tabs = [{ id: "all", label: "全部" }, { id: "files", label: "文件" }, { id: "apps", label: "应用" }] as const;
 type Tab = typeof tabs[number]["id"];
 type Catalog = { apps: MentionTarget[]; skills: MentionTarget[]; errors: string[]; loading: boolean };
 function TargetIcon({ kind }: { kind: MentionKind }) {
@@ -69,6 +69,7 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
   const trigger = mentionTrigger(draft, caret.start, caret.end);
   const open = enabled && !composing && !!trigger && dismissed !== trigger.key;
   const query = trigger?.query || "";
+  const skillsOnly = trigger?.prefix === "$";
 
   useLayoutEffect(() => {
     if (!open || !anchor.current) return;
@@ -96,13 +97,13 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
 
   useEffect(() => {
     if (!open) return;
-    const key = JSON.stringify([device, threadId, cwd, revision]);
+    const key = JSON.stringify([device, threadId, cwd, revision, skillsOnly]);
     if (catalogCache.current?.key === key) { setCatalog(catalogCache.current.value); return; }
     let stopped = false;
     setCatalog({ apps: [], skills: [], errors: [], loading: true });
     void Promise.allSettled([
-      availableApps(device, threadId, revision > 0, () => stopped),
-      availableSkills(device, cwd, revision > 0),
+      skillsOnly ? Promise.resolve([] as MentionTarget[]) : availableApps(device, threadId, revision > 0, () => stopped),
+      skillsOnly ? availableSkills(device, cwd, revision > 0) : Promise.resolve({ skills: [] as MentionTarget[], errors: [] as string[] }),
     ]).then(results => {
       if (stopped) return;
       const [apps, skills] = results;
@@ -119,11 +120,11 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
       setCatalog(value);
     });
     return () => { stopped = true; };
-  }, [open, device, threadId, cwd, revision]);
+  }, [open, device, threadId, cwd, revision, skillsOnly]);
 
   useEffect(() => {
     setFiles([]); setFileError(""); setFileLoading(false);
-    if (!open || !query || !cwd) return;
+    if (!open || skillsOnly || !query || !cwd) return;
     let stopped = false;
     setFileLoading(true);
     const timer = window.setTimeout(() => {
@@ -135,22 +136,21 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
         .finally(() => { if (!stopped) setFileLoading(false); });
     }, 200);
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [open, query, cwd, device, cancellationToken, revision]);
+  }, [open, skillsOnly, query, cwd, device, cancellationToken, revision]);
 
   const options = useMemo(() => {
     const currentProject: MentionTarget[] = !query && cwd ? [{ kind: "directory", name: folder(cwd), label: folder(cwd), path: cwd, relativePath: ".", detail: "当前项目 · " + cwd }] : [];
-    const candidates = [...currentProject, ...files, ...catalog.apps, ...catalog.skills];
+    const candidates = skillsOnly ? catalog.skills : [...currentProject, ...files, ...catalog.apps];
     const seen = new Set<string>();
     return candidates.filter(target => {
-      if (tab === "files" && target.kind !== "file" && target.kind !== "directory") return false;
-      if (tab === "skills" && target.kind !== "skill") return false;
-      if (tab === "apps" && target.kind !== "app") return false;
+      if (!skillsOnly && tab === "files" && target.kind !== "file" && target.kind !== "directory") return false;
+      if (!skillsOnly && tab === "apps" && target.kind !== "app") return false;
       if (target.kind !== "file" && target.kind !== "directory" && !matchesMention(target, query)) return false;
       const key = target.kind + ":" + target.path;
       if (seen.has(key)) return false;
       seen.add(key); return true;
     }).slice(0, 80);
-  }, [query, cwd, files, catalog.apps, catalog.skills, tab]);
+  }, [query, cwd, files, catalog.apps, catalog.skills, tab, skillsOnly]);
   useEffect(() => { setActiveIndex(0); }, [options]);
   useEffect(() => {
     if (open) list.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
@@ -165,20 +165,26 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
     const next = insertMention(draft, trigger.start, trigger.end, target);
     onChange(next.draft); setDismissed(""); focusAt(next.caret);
   };
-  const loading = ((tab === "all" || tab === "files") && fileLoading) || (tab !== "files" && catalog.loading);
-  const errors = [...((tab === "all" || tab === "files") && fileError ? ["文件：" + fileError] : []), ...(tab !== "files" ? catalog.errors : [])];
+  const loading = skillsOnly ? catalog.loading : ((tab === "all" || tab === "files") && fileLoading) || (tab !== "files" && catalog.loading);
+  const errors = [...(!skillsOnly && (tab === "all" || tab === "files") && fileError ? ["文件：" + fileError] : []), ...(skillsOnly || tab !== "files" ? catalog.errors : [])];
+  const startReference = (symbol: "@" | "$") => {
+    const input = inputRef.current, start = input?.selectionStart ?? draft.text.length, end = input?.selectionEnd ?? start;
+    const prefix = start > 0 && /[a-zA-Z0-9_.$@+-]/.test(draft.text[start - 1]) ? " " + symbol : symbol;
+    onChange(editDraft(draft, draft.text.slice(0, start) + prefix + draft.text.slice(end)));
+    setDismissed(""); focusAt(start + prefix.length);
+  };
   return <div className="mention-composer" ref={anchor}>
     {open && createPortal(<div className="mention-menu" style={menuStyle}>
-      <div className="mention-menu-heading"><AtSign size={15} /><strong>引用</strong><span title={deviceName}>{deviceName}</span><button type="button" className="icon-button" title="刷新引用列表" aria-label="刷新引用列表" onMouseDown={event => event.preventDefault()} onClick={() => setRevision(previous => previous + 1)}><RefreshCw size={13} /></button></div>
-      <div className="mention-tabs" role="group" aria-label="引用类型">{tabs.map(item => <button type="button" key={item.id} aria-pressed={tab === item.id} className={tab === item.id ? "selected" : ""} onMouseDown={event => event.preventDefault()} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
-      <div className="mention-options" id={menuId} role="listbox" aria-label="选择引用" aria-busy={loading} ref={list}>
+      <div className="mention-menu-heading">{skillsOnly ? <Sparkles size={15} /> : <AtSign size={15} />}<strong>{skillsOnly ? "使用技能" : "引用"}</strong><span title={deviceName}>{deviceName}</span><button type="button" className="icon-button" title={skillsOnly ? "刷新技能列表" : "刷新引用列表"} aria-label={skillsOnly ? "刷新技能列表" : "刷新引用列表"} onMouseDown={event => event.preventDefault()} onClick={() => setRevision(previous => previous + 1)}><RefreshCw size={13} /></button></div>
+      {!skillsOnly && <div className="mention-tabs" role="group" aria-label="引用类型">{tabs.map(item => <button type="button" key={item.id} aria-pressed={tab === item.id} className={tab === item.id ? "selected" : ""} onMouseDown={event => event.preventDefault()} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>}
+      <div className="mention-options" id={menuId} role="listbox" aria-label={skillsOnly ? "选择技能" : "选择引用"} aria-busy={loading} ref={list}>
         {options.map((target, index) => <button type="button" role="option" aria-selected={index === activeIndex} data-active={index === activeIndex} id={menuId + "-" + index} className={"mention-option " + (index === activeIndex ? "active" : "")} key={target.kind + ":" + target.path} title={target.detail} onMouseDown={event => event.preventDefault()} onMouseMove={() => setActiveIndex(index)} onClick={() => choose(target)}>
-          <span className="mention-option-icon"><TargetIcon kind={target.kind} /></span><span className="mention-option-copy"><strong>{target.label}</strong><small>{target.detail}</small></span><span className="mention-kind">{labels[target.kind]}</span>
+          <span className="mention-option-icon"><TargetIcon kind={target.kind} /></span><span className="mention-option-copy"><strong>{target.kind === "skill" ? "$" + target.name : target.label}</strong><small>{target.detail}</small></span><span className="mention-kind">{labels[target.kind]}</span>
         </button>)}
-        {!options.length && !loading && <div className="mention-empty">{!query && (tab === "files" || tab === "all") ? "输入文件名，搜索当前项目。" : "没有匹配的引用。"}</div>}
+        {!options.length && !loading && <div className="mention-empty">{skillsOnly ? cwd ? "没有匹配的技能。" : "当前会话未提供项目路径，无法读取技能。" : !query && (tab === "files" || tab === "all") ? "输入文件名，搜索当前项目。" : "没有匹配的引用。"}</div>}
         {loading && <div className="mention-loading"><Loader2 size={14} className="spin" />正在读取候选…</div>}
       </div>
-      {!query && (tab === "all" || tab === "files") && <div className="mention-search-hint">{cwd ? "继续输入可搜索项目文件和目录。" : "当前会话未提供项目路径，无法搜索文件。"}</div>}
+      {!skillsOnly && !query && (tab === "all" || tab === "files") && <div className="mention-search-hint">{cwd ? "继续输入可搜索项目文件和目录。" : "当前会话未提供项目路径，无法搜索文件。"}</div>}
       {!!errors.length && <details className="mention-query-errors"><summary>部分候选暂不可用</summary>{errors.map((error, index) => <p key={index}>{error}</p>)}</details>}
       <div className="mention-menu-footer">↑↓ 选择 · Enter / Tab 插入 · Esc 关闭</div>
     </div>, document.body)}
@@ -205,12 +211,10 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
         }
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); onSend(); }
       }} />
-    {!!validMentions(draft).length && <div className="mention-chips" aria-label="已选引用">{validMentions(draft).map(mention => <span className="mention-chip" key={mention.start + ":" + mention.path} title={mention.path}><TargetIcon kind={mention.kind} /><span>{mention.label}</span><button type="button" aria-label={"移除引用 " + mention.label} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(removeMention(draft, mention)); focusAt(mention.start); }}><X size={12} /></button></span>)}</div>}
-    <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 @ 引用文件、目录、技能或应用" onMouseDown={event => event.preventDefault()} onClick={() => {
-      const input = inputRef.current, start = input?.selectionStart ?? draft.text.length, end = input?.selectionEnd ?? start;
-      const prefix = start > 0 && /[a-zA-Z0-9_.+-]/.test(draft.text[start - 1]) ? " @" : "@";
-      onChange(editDraft(draft, draft.text.slice(0, start) + prefix + draft.text.slice(end)));
-      setDismissed(""); focusAt(start + prefix.length);
-    }}><AtSign size={13} />引用文件、技能或应用</button>
+    {!!validMentions(draft).length && <div className="mention-chips" aria-label="已选引用">{validMentions(draft).map(mention => <span className="mention-chip" key={mention.start + ":" + mention.path} title={mention.path}><TargetIcon kind={mention.kind} /><span>{mention.kind === "skill" ? "$" + mention.name : mention.label}</span><button type="button" aria-label={"移除引用 " + mention.label} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(removeMention(draft, mention)); focusAt(mention.start); }}><X size={12} /></button></span>)}</div>}
+    <div className="mention-shortcuts">
+      <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 @ 引用文件、目录或应用" onMouseDown={event => event.preventDefault()} onClick={() => startReference("@")}><AtSign size={13} />引用文件或应用</button>
+      <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 $ 使用技能" onMouseDown={event => event.preventDefault()} onClick={() => startReference("$")}><Sparkles size={13} />$ 使用技能</button>
+    </div>
   </div>;
 }

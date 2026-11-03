@@ -34,15 +34,16 @@ export function editDraft(draft: ComposerDraft, text: string): ComposerDraft {
 }
 export function mentionTrigger(draft: ComposerDraft, caret: number, selectionEnd: number) {
   if (caret !== selectionEnd || caret <= 0 || caret > draft.text.length) return null;
-  const start = draft.text.lastIndexOf("@", caret - 1);
-  if (start < 0 || (start > 0 && /[a-zA-Z0-9_.+-]/.test(draft.text[start - 1]))) return null;
+  const start = Math.max(draft.text.lastIndexOf("@", caret - 1), draft.text.lastIndexOf("$", caret - 1));
+  if (start < 0 || (start > 0 && /[a-zA-Z0-9_.$@+-]/.test(draft.text[start - 1]))) return null;
+  const prefix = draft.text[start] as "@" | "$";
   const query = draft.text.slice(start + 1, caret);
-  if (/[\s@]/.test(query) || query.length > 256) return null;
+  if (/[\s@$]/.test(query) || query.length > 256) return null;
   if (validMentions(draft).some(mention => mention.start <= start && mention.end >= caret)) return null;
-  return { start, end: caret, query, key: start + ":" + caret + ":" + query };
+  return { start, end: caret, prefix, query, key: prefix + start + ":" + caret + ":" + query };
 }
 export function insertMention(draft: ComposerDraft, start: number, end: number, target: MentionTarget) {
-  const token = "@" + (target.relativePath || target.label) + (target.kind === "directory" && !/[\\/]$/.test(target.relativePath || target.label) ? "/" : "");
+  const token = target.kind === "skill" ? "$" + target.name : "@" + (target.relativePath || target.label) + (target.kind === "directory" && !/[\\/]$/.test(target.relativePath || target.label) ? "/" : "");
   const trailing = /^\s/.test(draft.text.slice(end)) ? "" : " ";
   const text = draft.text.slice(0, start) + token + trailing + draft.text.slice(end);
   const next = editDraft(draft, text);
@@ -65,12 +66,13 @@ export function referenceInput(draft: ComposerDraft): Json[] {
     if (start < cursor) continue;
     text += source.slice(cursor, start);
     const byteStart = encoder.encode(text).length;
+    const token = mention.kind === "skill" ? "$" + mention.name : mention.token;
     if (mention.kind === "file" || mention.kind === "directory") {
       const label = mention.token.replace(/[\\[\]]/g, "\\$&");
       const path = encodeURI(mention.path.replace(/\\/g, "/")).replace(/[()#?<>]/g, value => encodeURIComponent(value));
       text += "[" + label + "](<" + path + ">)";
-    } else text += mention.token;
-    elements.push({ byte_range: { start: byteStart, end: encoder.encode(text).length }, placeholder: mention.token });
+    } else text += token;
+    elements.push({ byte_range: { start: byteStart, end: encoder.encode(text).length }, placeholder: token });
     const bindingKey = mention.kind + ":" + mention.path;
     if (!bound.has(bindingKey) && (mention.kind === "app" || mention.kind === "skill")) {
       bindings.push({ type: mention.kind === "app" ? "mention" : "skill", name: mention.name, path: mention.path });
