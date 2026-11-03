@@ -6,6 +6,7 @@ import { updateProgress, useUpdates } from "./updates";
 import { groupProjectThreads, type CodexProject, type ProjectGroup } from "./projects";
 import { WindowTitlebar } from "./WindowTitlebar";
 import { MentionComposer } from "./MentionComposer";
+import { MessageQueue } from "./MessageQueue";
 import { ContextUsage } from "./ContextUsage";
 import { EMPTY_DRAFT, type ComposerDraft } from "./mentions";
 import { referenceKind, type MessageReference } from "./message-text";
@@ -82,7 +83,8 @@ export default function App() {
   const local = deviceId === "local";
   const available = desktop && !!snapshot && (local || (device?.state === "connected" && device.peerSharing));
   const deviceName = local ? snapshot?.settings.identity.name || "这台电脑" : device?.peer?.name || "另一台电脑";
-  const workbench = useWorkbench(deviceId, available, setError);
+  const availableDevices = useMemo(() => new Set<string>(desktop && snapshot ? ["local", ...snapshot.devices.filter(device => device.state === "connected" && device.peerSharing).map(device => device.id)] : []), [snapshot]);
+  const workbench = useWorkbench(deviceId, available, setError, availableDevices);
   const connectionLabel = local ? "本机执行" : !available ? device?.state === "connected" ? "共享已暂停" : "连接已断开" : workbench.opening ? "正在同步会话" : "加密连接";
   const openReference = useCallback((reference: MessageReference) => {
     if (referenceKind(reference.href) === "thread") {
@@ -193,9 +195,18 @@ export default function App() {
   const signedOut = workbench.environment?.account?.requiresOpenaiAuth && !workbench.environment?.account?.account;
   const canCompose = available && workbench.ready && !workbench.opening && !workbench.thread?.relayArchived && !workbench.isArchiveBusy(workbench.selected || "") && workbench.environment?.installed !== false && !signedOut;
   const send = async () => {
-    if (!canCompose || !draft.trim() || workbench.activeTurn || workbench.sending) return;
+    if (!canCompose || !draft.trim()) return;
     const sent = draftState, draftKey = key;
     if (await workbench.send(sent, model, effort)) setDrafts(previous => previous[draftKey] === sent ? { ...previous, [draftKey]: EMPTY_DRAFT } : previous);
+  };
+  const queueing = !!workbench.activeTurn || workbench.sending || workbench.queue.length > 0;
+  const editQueued = (id: string) => {
+    if (draft.length) return;
+    const item = workbench.removeQueued(id);
+    if (!item) return;
+    setDrafts(previous => ({ ...previous, [key]: item.draft }));
+    setModel(item.model); setEffort(item.effort);
+    window.requestAnimationFrame(() => { composer.current?.focus(); composer.current?.setSelectionRange(item.draft.text.length, item.draft.text.length); });
   };
   useEffect(() => {
     if (composer.current) { composer.current.style.height = "auto"; composer.current.style.height = `${Math.min(composer.current.scrollHeight, 180)}px`; }
@@ -340,7 +351,7 @@ export default function App() {
             </div>
             <Transcript thread={workbench.thread} running={available && workbench.ready && !!workbench.activeTurn} older={() => void workbench.older()} hasOlder={!!workbench.olderCursor} loading={workbench.opening} offline={!available} onReference={openReference} />
             {workbench.ready && !workbench.opening && !!approvalForThread.length && <div className="approvals-container">{approvalForThread.map(request => <Approval request={request} key={request.id} deviceName={deviceName} resolve={workbench.resolve} />)}</div>}
-            {!workbench.thread.relayArchived && <div className="composer-container"><div className={`composer ${!canCompose ? "disabled" : ""}`}><MentionComposer key={key} device={deviceId} threadId={workbench.thread.relayDraft ? "" : workbench.selected || ""} cwd={workbench.thread.cwd || ""} deviceName={deviceName} enabled={canCompose && !modalOpen && !sidebarOverlay && !inspectorDrawer} draft={draftState} onChange={value => setDrafts(previous => ({ ...previous, [key]: value }))} inputRef={composer} onSend={() => void send()} placeholder={canCompose ? "输入消息，@ 引用文件或应用，$ 使用技能" : !available ? "连接已断开，可继续编辑草稿，恢复后再发送" : workbench.opening ? "正在同步会话，可继续编辑草稿" : workbench.resumeError ? "当前仅查看历史，接续成功后可发送消息" : "连接恢复后可继续输入和发送"} /><div className="composer-bottom"><div className="composer-selectors"><select aria-label="选择模型" title={selectedModel?.displayName || model || "主机默认模型"} value={model} disabled={!canCompose || workbench.sending || !!workbench.activeTurn} onChange={event => { const chosen = workbench.models.find((m: Json) => (m.model || m.id) === event.target.value); setModel(event.target.value); setEffort(chosen?.defaultReasoningEffort || ""); }}><option value="">主机默认模型</option>{workbench.models.map((m: Json) => <option key={m.id || m.model} value={m.model || m.id}>{m.displayName || m.model || m.id}</option>)}</select>{!!efforts.length && <select aria-label="推理强度" value={effort} disabled={!canCompose || !!workbench.activeTurn} onChange={event => setEffort(event.target.value)}><option value="">默认强度</option>{efforts.map((e: Json) => <option key={e.reasoningEffort} value={e.reasoningEffort}>{({ minimal: "最小", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大", ultra: "最高" } as Record<string, string>)[e.reasoningEffort] || e.reasoningEffort}</option>)}</select>}</div><div className="composer-actions"><ContextUsage usage={workbench.thread.tokenUsage} />{workbench.activeTurn ? <button className="stop-button" aria-label="停止当前回合" onClick={() => void workbench.stop()} disabled={!available || !workbench.ready || workbench.opening}><Square size={12} fill="currentColor" />停止</button> : <button className="send-button" aria-label="发送消息" disabled={!canCompose || !draft.trim() || workbench.sending} onClick={() => void send()}>{workbench.sending ? <Loader2 size={17} className="spin" /> : <ArrowUp size={19} />}</button>}</div></div></div><div className="composer-footnote"><span><Monitor size={11} />任务将在 {deviceName} 执行</span><span>Enter 发送 · Shift + Enter 换行</span></div></div>}</> : workbench.selected && workbench.opening ? <div className="center-state"><Loader2 className="spin" size={26} /><p>正在读取会话…</p></div> : <div className="welcome">
+            {!workbench.thread.relayArchived && <div className="composer-container"><MessageQueue items={workbench.queue} paused={workbench.queuePaused} available={canCompose} canEdit={!draft.length} onEdit={editQueued} onRemove={id => { workbench.removeQueued(id); }} onResume={workbench.resumeQueue} /><div className={`composer ${!canCompose ? "disabled" : ""}`}><MentionComposer key={key} device={deviceId} threadId={workbench.thread.relayDraft ? "" : workbench.selected || ""} cwd={workbench.thread.cwd || ""} deviceName={deviceName} enabled={canCompose && !modalOpen && !sidebarOverlay && !inspectorDrawer} draft={draftState} onChange={value => setDrafts(previous => ({ ...previous, [key]: value }))} inputRef={composer} onSend={() => void send()} placeholder={canCompose ? queueing ? "继续输入，Enter 加入队列，当前回合结束后发送" : "输入消息，@ 引用文件或应用，$ 使用技能" : !available ? "连接已断开，可继续编辑草稿，恢复后再发送" : workbench.opening ? "正在同步会话，可继续编辑草稿" : workbench.resumeError ? "当前仅查看历史，接续成功后可发送消息" : "连接恢复后可继续输入和发送"} /><div className="composer-bottom"><div className="composer-selectors"><select aria-label="选择模型" title={selectedModel?.displayName || model || "主机默认模型"} value={model} disabled={!canCompose} onChange={event => { const chosen = workbench.models.find((m: Json) => (m.model || m.id) === event.target.value); setModel(event.target.value); setEffort(chosen?.defaultReasoningEffort || ""); }}><option value="">主机默认模型</option>{workbench.models.map((m: Json) => <option key={m.id || m.model} value={m.model || m.id}>{m.displayName || m.model || m.id}</option>)}</select>{!!efforts.length && <select aria-label="推理强度" value={effort} disabled={!canCompose} onChange={event => setEffort(event.target.value)}><option value="">默认强度</option>{efforts.map((e: Json) => <option key={e.reasoningEffort} value={e.reasoningEffort}>{({ minimal: "最小", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大", ultra: "最高" } as Record<string, string>)[e.reasoningEffort] || e.reasoningEffort}</option>)}</select>}</div><div className="composer-actions"><ContextUsage usage={workbench.thread.tokenUsage} />{workbench.activeTurn && <button className="stop-button" aria-label="停止当前回合" onClick={() => void workbench.stop()} disabled={!available || !workbench.ready || workbench.opening}><Square size={12} fill="currentColor" />停止</button>}<button className="send-button" aria-label={queueing ? "加入消息队列" : "发送消息"} title={queueing ? "加入队列，当前回合结束后发送" : "发送消息"} disabled={!canCompose || !draft.trim()} onClick={() => void send()}><ArrowUp size={19} /></button></div></div></div><div className="composer-footnote"><span><Monitor size={11} />任务将在 {deviceName} 执行</span><span>{queueing ? "Enter 加入队列" : "Enter 发送"} · Shift + Enter 换行</span></div></div>}</> : workbench.selected && workbench.opening ? <div className="center-state"><Loader2 className="spin" size={26} /><p>正在读取会话…</p></div> : <div className="welcome">
               <h2>未选择会话</h2>
               <p className="welcome-description">从左侧打开已有会话，或新建会话。</p>
               <div className="welcome-actions">

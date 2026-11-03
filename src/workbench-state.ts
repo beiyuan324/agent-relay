@@ -16,7 +16,7 @@ export function retainedBytes(value: unknown): number {
   return size;
 }
 
-export function pruneCache(cache: Record<string, Json>, protectedKey: string | null, access: Map<string, number>,
+export function pruneCache(cache: Record<string, Json>, protectedKey: string | ReadonlySet<string> | null, access: Map<string, number>,
   maxThreads = CACHE_MAX_THREADS, maxBytes = CACHE_MAX_BYTES): Record<string, Json> {
   const entries = Object.entries(cache);
   let bytes = entries.reduce((sum, [, thread]) => sum + retainedBytes(thread), 0);
@@ -24,7 +24,7 @@ export function pruneCache(cache: Record<string, Json>, protectedKey: string | n
   const evicted = new Set<string>();
   for (const [key, thread] of entries.sort(([a], [b]) => (access.get(a) || 0) - (access.get(b) || 0))) {
     if (count <= maxThreads && bytes <= maxBytes) break;
-    if (key === protectedKey) continue;
+    if (typeof protectedKey === "string" ? key === protectedKey : protectedKey?.has(key)) continue;
     evicted.add(key); count--; bytes -= retainedBytes(thread);
   }
   return evicted.size ? Object.fromEntries(entries.filter(([key]) => !evicted.has(key))) : cache;

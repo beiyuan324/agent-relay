@@ -171,7 +171,7 @@ pub fn search_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// Preserve PATH precedence and append tools bundled with the selected Codex installation.
+/// Preserve PATH precedence and append Codex's bundled tools, including desktop resources.
 pub fn command_path(executable: &Path) -> Result<OsString> {
     let mut paths = search_paths();
     let rg = if cfg!(windows) { "rg.exe" } else { "rg" };
@@ -185,6 +185,9 @@ pub fn command_path(executable: &Path) -> Result<OsString> {
         }
         paths.extend(bundled.into_iter().filter(|path| path.is_absolute() && path.join(rg).is_file()));
     }
+    // The desktop app can cache codex.exe separately from its bundled rg.exe.
+    #[cfg(windows)]
+    paths.extend(desktop_resource_paths().into_iter().filter(|path| path.is_absolute() && path.join(rg).is_file()));
     let mut seen = HashSet::new();
     paths.retain(|path| {
         let key = path.as_os_str().to_os_string();
@@ -192,6 +195,30 @@ pub fn command_path(executable: &Path) -> Result<OsString> {
         seen.insert(key)
     });
     std::env::join_paths(paths).context("无法为 Codex 配置命令搜索路径，请检查 PATH 中是否包含无效字符")
+}
+
+#[cfg(windows)]
+fn desktop_resource_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        paths.push(local.join("OpenAI/Codex/resources"));
+        paths.push(local.join("Programs/Codex/resources"));
+    }
+    // Read packages registered for this user, including installations on other drives.
+    // Do not scan WindowsApps or depend on a particular desktop version or username.
+    let repository = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+    if let Ok(packages) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey(repository) {
+        for name in packages.enum_keys().filter_map(|entry| entry.ok()) {
+            if !name.starts_with("OpenAI.Codex_") { continue; }
+            let Ok(package) = packages.open_subkey(&name) else { continue };
+            let Ok(root) = package.get_value::<String, _>("PackageRootFolder") else { continue };
+            let root = PathBuf::from(root);
+            if root.is_absolute() {
+                paths.push(root.join("app/resources"));
+            }
+        }
+    }
+    paths
 }
 
 #[cfg(windows)]

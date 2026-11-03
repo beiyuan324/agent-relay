@@ -5,8 +5,17 @@ import { EMPTY_PROJECT_CATALOG, projectCatalog, type ProjectCatalog } from "./pr
 import { applyEvent, mergeLive, mergeApprovals, pruneCache, retainedBytes, type ApprovalUpdate } from "./workbench-state";
 export { applyEvent } from "./workbench-state";
 
+export interface QueuedMessage {
+  id: string;
+  draft: ComposerDraft;
+  model: string;
+  effort: string;
+  status: "queued" | "sending" | "failed";
+  error?: string;
+}
+interface MessageQueue { items: QueuedMessage[]; paused?: string }
 const keyOf = (device: string, thread: string) => JSON.stringify([device, thread]);
-export function useWorkbench(device: string, available: boolean, onError: (error: string) => void) {
+export function useWorkbench(device: string, available: boolean, onError: (error: string) => void, availableDevices?: ReadonlySet<string>) {
   const [threads, setThreads] = useState<Json[]>([]);
   const [archiveExpanded, setArchiveExpanded] = useState(false);
   const [archivedThreads, setArchivedThreads] = useState<Json[]>([]);
@@ -58,7 +67,31 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const openEpoch = useRef(0);
   const processEpoch = useRef<Record<string, number>>({});
   const sendingRef = useRef(false);
+  const [queues, setQueues] = useState<Record<string, MessageQueue>>({});
+  const queued = useRef(queues);
+  const inFlight = useRef<{ key: string } | null>(null);
+  const liveTurns = useRef<Record<string, { id: string; status: string; sequence: number }>>({});
+  const connected = useRef<ReadonlySet<string>>(new Set());
+  connected.current = availableDevices || new Set(available ? [device] : []);
   const onErrorRef = useRef(onError); onErrorRef.current = onError;
+
+  const updateQueues = useCallback((update: (previous: Record<string, MessageQueue>) => Record<string, MessageQueue>) => {
+    const next = update(queued.current);
+    if (next === queued.current) return;
+    queued.current = Object.fromEntries(Object.entries(next).filter(([, queue]) => queue.items.length));
+    setQueues(queued.current);
+  }, []);
+  const pauseQueue = useCallback((key: string, reason: string) => {
+    updateQueues(previous => !previous[key]?.items.length || previous[key].paused === reason ? previous : {
+      ...previous, [key]: { ...previous[key], paused: reason },
+    });
+  }, [updateQueues]);
+
+  useEffect(() => {
+    for (const key of resumed.current) {
+      if (!connected.current.has(JSON.parse(key)[0])) resumed.current.delete(key);
+    }
+  }, [availableDevices, device, available]);
 
   const setCache = useCallback((update: (previous: Record<string, Json>) => Record<string, Json>) => {
     updateCache(previous => {
@@ -68,7 +101,9 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       for (const [key, thread] of Object.entries(next)) {
         if (thread !== previous[key] || key === protectedKey) cacheAccess.current.set(key, ++accessClock.current);
       }
-      return pruneCache(next, protectedKey, cacheAccess.current);
+      const protectedKeys = new Set(Object.keys(queued.current));
+      if (protectedKey) protectedKeys.add(protectedKey);
+      return pruneCache(next, protectedKeys, cacheAccess.current);
     });
   }, []);
 
@@ -108,6 +143,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       cacheAccess.current.delete(key);
       delete events.current[key];
       resumed.current.delete(key);
+      delete liveTurns.current[key];
     }
     setSessions(previous => {
       const entries = Object.entries(previous).filter(([key]) => cache[key]);
@@ -266,6 +302,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     const startedAt = sequence.current;
     selection.current[target] = { id, archived };
     resumed.current.delete(key);
+    delete liveTurns.current[key];
     setSessions(previous => ({ ...previous, [key]: { ready: false } }));
     active.current = { ...active.current, selected: id };
     setSelected(id); setOpening(true);
@@ -332,6 +369,9 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         }
       }
       if (!current()) return;
+      const latest = (thread.turns || []).at(-1);
+      if (historyError) pauseQueue(key, "会话历史未同步完整，请重新读取后继续队列");
+      else if (latest && ["failed", "interrupted"].includes(latest.status)) pauseQueue(key, "上个回合未正常完成，队列已暂停");
       flushEvents();
       const touched = new Set(Object.entries(events.current[key]?.turns || {}).filter(([, updated]) => updated > startedAt).map(([id]) => id));
       // Merge live snapshots; replaying deltas onto a fetched snapshot can duplicate text.
@@ -354,7 +394,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         setSessions(previous => ({ ...previous, [key]: { ready: false, ...(archived ? { historyError: message(error) } : { resumeError: message(error) }) } }));
       }
     } finally { if (epoch === openEpoch.current) setOpening(false); }
-  }, [flushEvents, setCache]);
+  }, [flushEvents, pauseQueue, setCache]);
 
   const toggleArchive = useCallback(() => {
     const expanded = !active.current.archiveExpanded;
@@ -367,6 +407,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     const key = keyOf(target, id);
     if (archiveFlags.current[key] === archived) return;
     archiveFlags.current[key] = archived;
+    if (archived) pauseQueue(key, "会话已归档，恢复会话后可继续队列");
     delete newThreads.current[key];
     resumed.current.delete(key);
     setSessions(previous => ({ ...previous, [key]: { ready: false } }));
@@ -383,7 +424,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       setSelected(null); setOpening(false); setOlderCursor(null); setPermissions(null);
     }
     setListRevision(previous => previous + 1);
-  }, []);
+  }, [pauseQueue]);
 
   const materializeThread = useCallback((target: string, id: string) => {
     const key = keyOf(target, id);
@@ -403,6 +444,10 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       flushEvents();
       delete approvalUpdates.current[target];
       processEpoch.current[target] = (processEpoch.current[target] || 0) + 1;
+      for (const key of Object.keys(queued.current)) {
+        if (JSON.parse(key)[0] === target) pauseQueue(key, "Codex 已退出，重新接续会话后可继续队列");
+      }
+      for (const key of Object.keys(liveTurns.current)) if (JSON.parse(key)[0] === target) delete liveTurns.current[key];
       const endedAt = Date.now();
       const discarded = new Set<string>();
       for (const [key, thread] of Object.entries(newThreads.current)) {
@@ -447,6 +492,17 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       applyArchiveState(target, id, value.method === "thread/archived");
       return;
     }
+    if (value.method === "thread/status/changed" && p.status?.type === "active" && liveTurns.current[key]?.status !== "inProgress") delete liveTurns.current[key];
+    if ((value.method === "turn/started" || value.method === "turn/completed") && (cached.current[key] || queued.current[key])) {
+      liveTurns.current[key] = { id: p.turn?.id || p.turnId, status: p.turn?.status || (value.method === "turn/started" ? "inProgress" : "completed"), sequence: ++sequence.current };
+      if (value.method === "turn/completed" && liveTurns.current[key].status !== "completed") {
+        pauseQueue(key, liveTurns.current[key].status === "interrupted" ? "当前回合已停止，队列已暂停" : "当前回合未正常完成，队列已暂停");
+      }
+    }
+    if (value.method === "thread/closed") {
+      resumed.current.delete(key);
+      pauseQueue(key, "会话已关闭，重新接续后可继续队列");
+    }
     if (value.method === "turn/started") {
       materializeThread(target, id);
       if (target === active.current.device && !newThreads.current[key] && !listed.current.some(thread => thread.id === id)) setListRevision(previous => previous + 1);
@@ -474,7 +530,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         timer: window.setTimeout(flushEvents, 100),
       };
     }
-  }, [applyArchiveState, flushEvents, materializeThread, recordApproval, setCache]);
+  }, [applyArchiveState, flushEvents, materializeThread, pauseQueue, recordApproval, setCache]);
 
   const archiveReason = (thread: Json): string => {
     const key = keyOf(device, thread.id);
@@ -483,7 +539,8 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     if (archiveBusy[key]) return "正在更新归档状态";
     if (newThreads.current[key]?.relayHistoryPending === true) return "发送首条消息后可归档";
     if (selected === thread.id && opening) return "正在读取会话";
-    if (selected === thread.id && sending) return "正在发送消息";
+    if (inFlight.current?.key === key) return "正在发送消息";
+    if (queued.current[key]?.items.length) return "请先处理此会话的待发消息";
     if (current.status?.type === "active" || (current.turns || []).some((turn: Json) => turn.status === "inProgress")) return "请等待当前任务结束后归档";
     if ((requests[device] || []).some(request => request.params?.threadId === thread.id)) return "请先处理此会话的待办审批";
     return "";
@@ -530,12 +587,16 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     setPermissions({ model });
     setSessions(previous => ({ ...previous, [key]: { ready: true } }));
   };
-  const send = async (draft: ComposerDraft, model: string, effort: string): Promise<boolean> => {
-    const { device: target, selected: selectedId, available } = active.current;
+  const submit = useCallback(async (target: string, selectedId: string, item: QueuedMessage) => {
+    if (sendingRef.current || queued.current[keyOf(target, selectedId)]?.items[0]?.id !== item.id || queued.current[keyOf(target, selectedId)]?.items[0]?.status !== "queued") return;
     let id = selectedId;
-    if (!id || !available || (!newThreads.current[keyOf(target, id)]?.relayDraft && !resumed.current.has(keyOf(target, id))) || archiveFlags.current[keyOf(target, id)] === true || archiveMutations.current.has(keyOf(target, id)) || !draft.text.trim() || sendingRef.current) return false;
+    const { draft, model, effort } = item;
+    const flight = { key: keyOf(target, id) };
+    inFlight.current = flight;
     sendingRef.current = true; setSending(true);
+    updateQueues(previous => ({ ...previous, [flight.key]: { ...previous[flight.key], items: previous[flight.key].items.map(row => row.id === item.id ? { ...row, status: "sending" } : row) } }));
     const submittedAt = Date.now();
+    const submittedSequence = sequence.current;
     const generation = processEpoch.current[target] || 0;
     try {
       const draftKey = keyOf(target, id);
@@ -551,6 +612,12 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         delete newThreads.current[draftKey];
         resumed.current.delete(draftKey);
         resumed.current.add(key);
+        flight.key = key;
+        updateQueues(previous => {
+          const next = { ...previous, [key]: previous[draftKey] };
+          delete next[draftKey];
+          return next;
+        });
         if (selection.current[target]?.id === selectedId) selection.current[target] = { id, archived: false };
         if (target === active.current.device && active.current.selected === selectedId) {
           ++openEpoch.current;
@@ -569,12 +636,19 @@ export function useWorkbench(device: string, available: boolean, onError: (error
           return next;
         });
       }
+      if (!connected.current.has(target) || generation !== (processEpoch.current[target] || 0) || !resumed.current.has(keyOf(target, id))) throw new Error("连接或会话状态已变化，请重新接续后发送");
       const result = await call(target, "turn/start", {
         threadId: id, input: referenceInput(draft),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       });
       if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，请重新读取会话确认提交状态");
       const key = keyOf(target, id);
+      if (!result.turn?.id) throw new Error("未收到回合确认，请查看会话后重试或移除此消息");
+      const observed = liveTurns.current[key];
+      // A completion notification (or a newer turn) can arrive before this reply.
+      if (!observed || observed.sequence <= submittedSequence || (observed.id === result.turn.id && observed.status === "inProgress")) {
+        liveTurns.current[key] = { id: result.turn.id, status: result.turn.status || "inProgress", sequence: observed?.id === result.turn.id ? observed.sequence : submittedSequence };
+      }
       if (result.turn?.id) {
         if (newThreads.current[key] && !newThreads.current[key].preview) newThreads.current[key].preview = draft.text.trim();
         materializeThread(target, id);
@@ -584,13 +658,66 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         const existing = (thread.turns || []).find((turn: Json) => turn.id === result.turn.id);
         const timing = { startedAtMs: submittedAt, ...existing?.relayTiming };
         const turns = existing
-          ? thread.turns.map((turn: Json) => turn.id === result.turn.id ? { ...turn, relayTiming: timing } : turn)
+          ? thread.turns.map((turn: Json) => turn.id === result.turn.id ? { ...result.turn, ...turn, status: turn.status !== "inProgress" ? turn.status : result.turn.status || turn.status, relayTiming: timing } : turn)
           : [...(thread.turns || []), { ...result.turn, relayTiming: timing }];
         return { ...previous, [key]: { ...thread, turns } };
       });
-      return true;
-    } catch (error) { onErrorRef.current(message(error)); return false; }
-    finally { sendingRef.current = false; if (target === active.current.device) setSending(false); }
+      if (["failed", "interrupted"].includes(liveTurns.current[key]?.status || "")) pauseQueue(key, "当前回合未正常完成，队列已暂停");
+      updateQueues(previous => !previous[flight.key] ? previous : ({
+        ...previous, [flight.key]: { ...previous[flight.key], items: previous[flight.key].items.filter(row => row.id !== item.id) },
+      }));
+    } catch (error) {
+      const detail = message(error);
+      updateQueues(previous => !previous[flight.key] ? previous : ({
+        ...previous, [flight.key]: { ...previous[flight.key], paused: "发送未完成，请查看会话后重试或移除此消息", items: previous[flight.key].items.map(row => row.id === item.id ? { ...row, status: "failed", error: detail } : row) },
+      }));
+      onErrorRef.current(detail);
+    } finally {
+      inFlight.current = null;
+      sendingRef.current = false;
+      setSending(false);
+    }
+  }, [materializeThread, pauseQueue, setCache, updateQueues]);
+
+  const send = async (draft: ComposerDraft, model: string, effort: string): Promise<boolean> => {
+    const { device: target, selected: id, available } = active.current;
+    if (!id || !available || !resumed.current.has(keyOf(target, id)) || archiveFlags.current[keyOf(target, id)] === true || archiveMutations.current.has(keyOf(target, id)) || !draft.text.trim()) return false;
+    const key = keyOf(target, id);
+    const item: QueuedMessage = { id: crypto.randomUUID(), draft: { text: draft.text, mentions: draft.mentions.map(mention => ({ ...mention })) }, model, effort, status: "queued" };
+    updateQueues(previous => ({ ...previous, [key]: { ...previous[key], items: [...(previous[key]?.items || []), item] } }));
+    return true;
+  };
+
+  useEffect(() => {
+    if (sendingRef.current) return;
+    for (const [key, queue] of Object.entries(queues)) {
+      const [target, id] = JSON.parse(key) as [string, string];
+      const item = queue.items[0], thread = cache[key];
+      if (!item || item.status !== "queued" || queue.paused || !connected.current.has(target) || !resumed.current.has(key) || !thread || thread.relayArchived || archiveFlags.current[key] || archiveMutations.current.has(key)) continue;
+      const live = liveTurns.current[key];
+      if (live?.status === "inProgress" || (!live && thread.status?.type === "active") || (thread.turns || []).some((turn: Json) => turn.status === "inProgress" && !(live && live.id === turn.id && live.status !== "inProgress"))) continue;
+      if (pendingEvents.current.some(event => event.key === key)) continue;
+      if ((requests[target] || []).some(request => !request.params?.threadId || request.params.threadId === id)) continue;
+      void submit(target, id, item);
+      break;
+    }
+  }, [queues, cache, sessions, requests, device, available, availableDevices, sending, submit]);
+
+  const removeQueued = (id: string): QueuedMessage | undefined => {
+    const current = active.current;
+    if (!current.selected) return;
+    const key = keyOf(current.device, current.selected);
+    const item = queued.current[key]?.items.find(item => item.id === id);
+    if (!item || item.status === "sending") return;
+    updateQueues(previous => ({ ...previous, [key]: { ...previous[key], items: previous[key].items.filter(row => row.id !== id) } }));
+    return item;
+  };
+  const resumeQueue = (retryId?: string) => {
+    const current = active.current;
+    if (!current.selected || !current.available) return;
+    const key = keyOf(current.device, current.selected), queue = queued.current[key];
+    if (!queue || !resumed.current.has(key)) return;
+    updateQueues(previous => ({ ...previous, [key]: { items: queue.items.map(item => item.id === retryId && item.status === "failed" ? { ...item, status: "queued", error: undefined } : item) } }));
   };
   const thread = selected ? cache[keyOf(device, selected)] : undefined;
   const session = selected ? sessions[keyOf(device, selected)] : undefined;
@@ -598,6 +725,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const activeTurn = [...(thread?.turns || [])].reverse().find((turn: Json) => turn.status === "inProgress");
   const stop = async () => {
     if (!selected || !available || !resumed.current.has(keyOf(device, selected)) || !activeTurn?.id) return;
+    pauseQueue(keyOf(device, selected), "已停止当前回合，队列已暂停");
     try { await call(device, "turn/interrupt", { threadId: selected, turnId: activeTurn.id }); }
     catch (error) { onErrorRef.current(message(error)); }
   };
@@ -638,7 +766,10 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     archivedThreads, archivedNextCursor, archivedLoading, archivedError, archiveExpanded, toggleArchive,
     changeArchive, archiveReason,
     isArchiveBusy: (id: string) => !!archiveBusy[keyOf(device, id)],
-    search, setSearch, nextCursor, loading, opening, sending, activeTurn, olderCursor,
+    search, setSearch, nextCursor, loading, opening, sending: selected ? !!queues[keyOf(device, selected)]?.items.some(item => item.status === "sending") : false, activeTurn, olderCursor,
+    queue: selected ? queues[keyOf(device, selected)]?.items || [] : [],
+    queuePaused: selected ? queues[keyOf(device, selected)]?.paused : undefined,
+    removeQueued, resumeQueue,
     ready, resumeError: session?.resumeError, historyError: session?.historyError,
     open, event, create, send, stop, resolve, older,
     refresh: () => { refreshTargets.current.add(active.current.device); setEnvironmentRevision(previous => previous + 1); },

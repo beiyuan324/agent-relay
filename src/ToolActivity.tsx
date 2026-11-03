@@ -59,9 +59,9 @@ function activityState(item: Json, active: boolean) {
     : item.success === false || item.status === "error" || item.status === "failed");
   const rejected = item.status === "declined" || item.status === "denied";
   const interrupted = item.status === "interrupted";
-  const running = active && !failed && !rejected && !interrupted && !hasExitCode && (item.status === "inProgress" || item.status === "running" || (item.status == null && item.success == null));
-  const ended = !active && !hasExitCode && (item.status === "inProgress" || item.status === "running");
   const completed = item.status === "completed" || item.success === true || hasExitCode;
+  const running = active && !completed && !failed && !rejected && !interrupted && (item.status === "inProgress" || item.status === "running" || (item.status == null && item.success == null));
+  const ended = !active && !completed && (item.status === "inProgress" || item.status === "running");
   const state = failed ? "失败" : running ? "进行中" : rejected ? "已拒绝" : ended ? "已结束" : item.status === "interrupted" ? "已停止" : completed ? "已完成" : "已记录";
   return { failed, rejected, interrupted, running, ended, state };
 }
@@ -82,19 +82,43 @@ function activityCategory(item: Json): string {
   }
 }
 
+function runningActivityLabel(item: Json): string {
+  if (item.type === "commandExecution") {
+    const args = toolArguments(item);
+    const description = [item.title, args.title, args.description].find(value => typeof value === "string" && value.trim());
+    const command = shellCommand(commandText(item)).trim().replace(/\s+/g, " ");
+    return description ? "正在" + description.trim() : "正在运行" + (command ? " " + command : "命令");
+  }
+  if (item.type === "fileChange") {
+    const paths = (item.changes || []).map((change: Json) => change.path).filter((path: unknown): path is string => typeof path === "string" && !!path.trim());
+    return "正在修改" + (paths.length ? " " + [...new Set(paths)].join("、") : "文件");
+  }
+  if (item.type === "webSearch" || item.type === "imageView") return "正在" + toolName(item);
+  const category = activityCategory(item);
+  return category === "调用工具" ? "正在调用 " + toolName(item) : "正在" + category + " · " + toolName(item);
+}
+
 export function ToolActivityGroup({ items, active }: { items: Json[]; active: boolean }) {
   const states = items.map(item => activityState(item, active));
-  const running = states.some(state => state.running);
+  const runningCount = states.filter(state => state.running).length;
+  const running = runningCount > 0;
+  // Follow the newest running call, including when several tools execute in parallel.
+  let currentIndex = -1;
+  for (let index = states.length - 1; index >= 0; index--) {
+    if (states[index].running) { currentIndex = index; break; }
+  }
+  const currentItem = currentIndex >= 0 ? items[currentIndex] : null;
   const failed = states.filter(state => state.failed).length;
   const rejected = states.filter(state => state.rejected).length;
   const interrupted = states.filter(state => state.interrupted).length;
-  const label = (running ? "正在" : "已") + [...new Set(items.map(activityCategory))].join("、");
-  const status = [running ? "进行中" : "", failed ? `${failed} 项失败` : "", rejected ? `${rejected} 项已拒绝` : "", interrupted ? `${interrupted} 项已停止` : ""].filter(Boolean).join(" · ");
+  const summaryLabel = "已" + [...new Set(items.map(activityCategory))].join("、");
+  const label = currentItem ? runningActivityLabel(currentItem) : summaryLabel;
+  const status = [running ? (runningCount > 1 ? `${runningCount} 项进行中` : "进行中") : "", failed ? `${failed} 项失败` : "", rejected ? `${rejected} 项已拒绝` : "", interrupted ? `${interrupted} 项已停止` : ""].filter(Boolean).join(" · ");
   const title = `${label} · ${items.length} 次调用${status ? " · " + status : ""}`;
   return <details className={"tool-activity-group" + (running ? " is-running" : "") + (failed ? " is-failed" : "")}>
     <summary title={title} aria-label={title}>
       {running ? <Loader2 size={14} className="spin" /> : failed ? <AlertCircle size={14} /> : <Wrench size={14} />}
-      <span className="activity-title">{label}</span>
+      <span className="activity-title activity-group-title"><span key={currentItem ? `running:${currentItem.id ?? currentIndex}` : "summary"} className="activity-group-label">{label}</span></span>
       <span className="activity-group-count">{items.length} 次调用</span>
       {status && <span className={"activity-group-status" + (failed ? " is-failed" : "")}>{status}</span>}
       <ChevronDown size={12} className="activity-chevron" />

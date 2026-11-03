@@ -343,6 +343,10 @@ a.message-reference:hover { background: color-mix(in srgb,var(--blue) 20%,var(--
 .reasoning[open]>summary .activity-chevron, .tool-activity[open]>summary .activity-chevron, .tool-activity-group[open]>summary .activity-chevron { transform: rotate(180deg); }
 .tool-activity-group>summary { width: fit-content; max-width: 100%; }
 .tool-activity-group>summary>svg { flex-shrink: 0; }
+.activity-group-label { display: block; overflow: hidden; text-overflow: ellipsis; animation: activity-label-enter .18s ease-out; }
+@supports ((background-clip: text) or (-webkit-background-clip: text)) {
+  .tool-activity-group.is-running .activity-group-label { color: transparent; background-image: linear-gradient(105deg,var(--secondary) 0%,var(--secondary) 36%,var(--text) 50%,var(--secondary) 64%,var(--secondary) 100%); background-size: 240% 100%; background-clip: text; -webkit-background-clip: text; animation: activity-label-enter .18s ease-out, activity-shimmer 2s linear infinite; }
+}
 .activity-group-count { flex-shrink: 0; color: var(--tertiary); font-size: 12px; white-space: nowrap; }
 .activity-group-status { min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; color: var(--secondary); font-size: 12px; white-space: nowrap; }
 .activity-group-status.is-failed, .tool-activity-group.is-failed>summary>svg:first-child { color: var(--error); }
@@ -373,6 +377,22 @@ a.message-reference:hover { background: color-mix(in srgb,var(--blue) 20%,var(--
 .load-older { display: block; margin: 7px auto 20px; padding: 6px 12px; color: var(--blue); border: 1px solid var(--line); background: var(--surface); border-radius: 6px; font-size: 12px; }
 .composer-container { display: flex; flex-direction: column; min-height: 184px; max-height: 52%; padding: var(--space-3) var(--content-gutter) var(--space-4); flex: 0 1 auto; }
 .composer { display: flex; flex-direction: column; width: 100%; min-height: 0; max-width: var(--content-width); margin: 0 auto; border: 1px solid color-mix(in srgb,var(--secondary) 25%,transparent); border-radius: 12px; background: var(--surface); padding: 12px; box-shadow: 0 4px 14px #00000003; }
+.message-queue { display: flex; flex-direction: column; min-height: 54px; max-height: 172px; flex: 0 1 auto; width: 100%; max-width: var(--content-width); margin: 0 auto 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); overflow: hidden; }
+.message-queue-heading { display: flex; flex-shrink: 0; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 10px; color: var(--secondary); font-size: var(--font-caption); }
+.message-queue-heading strong { color: var(--text); white-space: nowrap; }
+.message-queue-heading strong span { margin-left: 3px; color: var(--secondary); font-weight: 400; }
+.message-queue-hint { flex: 1 1 140px; min-width: 0; overflow-wrap: anywhere; }
+.message-queue-heading .text-button { display: inline-flex; align-items: center; gap: 4px; padding: 2px; white-space: nowrap; }
+.message-queue-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; list-style: none; margin: 0; padding: 0 6px 5px; }
+.queued-message { display: flex; align-items: flex-start; gap: 8px; padding: 7px 4px; border-top: 1px solid var(--line); }
+.queued-message-order { display: grid; place-items: center; width: 18px; height: 22px; flex-shrink: 0; font-size: 11px; color: var(--tertiary); }
+.queued-message-copy { flex: 1; min-width: 0; }
+.queued-message-copy>p:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 22px; }
+.queued-message-copy small { display: block; color: var(--tertiary); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.queued-message-copy .queued-message-error { color: var(--error); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-caption); line-height: 1.6; margin-top: 3px; }
+.queued-message.failed .queued-message-order { color: var(--error); }
+.queued-message-actions { display: flex; flex-shrink: 0; gap: 2px; }
+.queued-message-actions .icon-button { width: 26px; height: 26px; }
 .composer.disabled { background: var(--surface-muted); border-color: var(--line); }
 .composer:focus-within { border-color: color-mix(in srgb,var(--blue) 40%,transparent); box-shadow: 0 0 0 2px color-mix(in srgb,var(--blue) 5%,transparent); }
 .composer textarea { border: 0; background: none; padding: 0 2px; width: 100%; min-height: 52px; max-height: 180px; line-height: 1.85; font-size: 15px; resize: none; outline: none; }
@@ -562,6 +582,8 @@ a.message-reference:hover { background: color-mix(in srgb,var(--blue) 20%,var(--
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 50% { opacity: .35; } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes activity-label-enter { from { opacity: .45; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes activity-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (max-width:1100px) {
   .app-shell,.app-shell.sidebar-collapsed { grid-template-columns: 64px 248px minmax(0,1fr); --content-gutter: 16px; }
   .toolbar-trailing { gap: 4px; }
@@ -572,4 +594,5 @@ a.message-reference:hover { background: color-mix(in srgb,var(--blue) 20%,var(--
 }
 @media (prefers-reduced-motion: reduce) {
   *,*::before,*::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
+  .tool-activity-group.is-running .activity-group-label { color: var(--secondary); background-image: none; }
 }
