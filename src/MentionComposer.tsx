@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { AtSign, Blocks, File, Folder, Loader2, RefreshCw, Slash, Sparkles, X } from "lucide-react";
+import { AtSign, Blocks, File, Folder, Loader2, RefreshCw, Sparkles, X } from "lucide-react";
 import { call, folder, message, type Json } from "./api";
 import { editDraft, fileTarget, insertMention, matchesMention, mentionTrigger, removeMention, validMentions, type ComposerDraft, type MentionKind, type MentionTarget } from "./mentions";
 
@@ -207,10 +207,9 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
   };
   return <div className="mention-composer" ref={anchor}>
     {slashOpen && createPortal(<div className="mention-menu slash-menu" style={menuStyle}>
-      <div className="mention-menu-heading"><Slash size={15} /><strong>命令与技能</strong><span title={deviceName}>{deviceName}</span></div>
+      <div className="mention-menu-heading"><strong>命令与技能</strong><span title={deviceName}>{deviceName}</span></div>
       <div className="mention-options" id={menuId} role="listbox" aria-label="选择命令或技能" ref={list}>
         {slashOptions.map((option, index) => <button type="button" role="option" aria-selected={index === selectedSlashIndex} aria-disabled={!!option.command?.disabledReason} data-active={index === selectedSlashIndex} id={menuId + "-" + index} className={"mention-option " + (index === selectedSlashIndex ? "active" : "")} key={option.key} title={option.command?.disabledReason || option.command?.description || option.target?.detail} onMouseDown={event => event.preventDefault()} onMouseMove={() => setSlashIndex(index)} onClick={() => chooseSlash(index)}>
-          <span className="mention-option-icon">{option.target ? <Sparkles size={16} /> : <Slash size={16} />}</span>
           <span className="mention-option-copy"><strong>{option.command ? "/" + option.command.id : "/" + option.target!.name}<span className="slash-command-label">{option.command?.label}</span></strong><small>{option.command?.disabledReason || option.command?.description || option.target?.detail}</small></span>
           <span className="mention-kind">{option.target ? "技能" : "命令"}</span>
         </button>)}
@@ -277,7 +276,7 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
       }} />
     {!!validMentions(draft).length && <div className="mention-chips" aria-label="已选引用">{validMentions(draft).map(mention => <span className="mention-chip" key={mention.start + ":" + mention.path} title={mention.path}><TargetIcon kind={mention.kind} /><span>{mention.kind === "skill" ? "$" + mention.name : mention.label}</span><button type="button" aria-label={"移除引用 " + mention.label} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(removeMention(draft, mention)); focusAt(mention.start); }}><X size={12} /></button></span>)}</div>}
     <div className="mention-shortcuts">
-      {onCommand && <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 / 打开命令菜单" onMouseDown={event => event.preventDefault()} onClick={() => { const body = draft.text.startsWith("/") ? draft.text.replace(/^\/[^\s]*\s*/, "") : draft.text; onChange(editDraft(draft, "/" + (body ? " " + body : ""))); setDismissed(""); focusAt(1); }}><Slash size={13} />命令</button>}
+      {onCommand && <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 / 打开命令菜单" onMouseDown={event => event.preventDefault()} onClick={() => { const body = draft.text.startsWith("/") ? draft.text.replace(/^\/[^\s]*\s*/, "") : draft.text; onChange(editDraft(draft, "/" + (body ? " " + body : ""))); setDismissed(""); focusAt(1); }}><span className="slash-symbol" aria-hidden="true">/</span>命令</button>}
       <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 @ 引用文件、目录或应用" onMouseDown={event => event.preventDefault()} onClick={() => startReference("@")}><AtSign size={13} />引用文件或应用</button>
       <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 $ 使用技能" onMouseDown={event => event.preventDefault()} onClick={() => startReference("$")}><Sparkles size={13} />$ 使用技能</button>
     </div>
