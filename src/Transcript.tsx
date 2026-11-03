@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { AlertCircle, Blocks, ChevronDown, ChevronRight, FileCode2, ListChecks, Loader2, MessageSquare, X } from "lucide-react";
 import type { Json } from "./api";
 import { messageBody, messageLinks, referenceKind, type MessageReference } from "./message-text";
-import { ToolActivity } from "./ToolActivity";
+import { ToolActivity, ToolActivityGroup } from "./ToolActivity";
 export { Approval } from "./Approval";
 
 const ReferenceContext = createContext<((reference: MessageReference) => void) | undefined>(undefined);
@@ -79,6 +79,18 @@ const Item = memo(function Item({ item, active = false }: { item: Json; active?:
       return <ToolActivity item={item} active={active} />;
   }
 });
+function ProcessItems({ items, active }: { items: Json[]; active: boolean }) {
+  const groups: { tools: boolean; items: Json[]; key: string }[] = [];
+  for (const [index, item] of items.entries()) {
+    const tools = !["userMessage", "agentMessage", "plan", "reasoning"].includes(item.type);
+    const previous = groups[groups.length - 1];
+    if (tools && previous?.tools) previous.items.push(item);
+    else groups.push({ tools, items: [item], key: `${tools ? "tools" : "item"}:${item.id ?? index}` });
+  }
+  return <>{groups.map(group => group.tools
+    ? <ToolActivityGroup key={group.key} items={group.items} active={active} />
+    : <Item key={group.key} item={group.items[0]} active={active} />)}</>;
+}
 function finiteMilliseconds(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
@@ -135,7 +147,7 @@ const Turn = memo(function Turn({ turn, running }: { turn: Json; running: boolea
     {users.map(item => <Item key={item.id} item={item} />)}
     {process.length > 0 ? <details className="turn-process" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
       <summary className="turn-process-summary" title={`${timingHint}；点击展开或收起处理过程`}><span>{active && <Loader2 size={14} className="spin" />}{label}</span><ChevronRight size={14} className="turn-process-chevron" /></summary>
-      {expanded && <div className="turn-process-body">{process.map(item => <Item key={item.id} item={item} active={active} />)}</div>}
+      {expanded && <div className="turn-process-body"><ProcessItems items={process} active={active} /></div>}
     </details> : <div className="turn-duration" title={timingHint}>{active && <Loader2 size={14} className="spin" />}{label}</div>}
     {results.map(item => <Item key={item.id} item={item} />)}
     {turn.status === "completed" && !results.length && !!process.length && <div className="turn-note">此回合没有最终答复，可展开处理过程查看。</div>}

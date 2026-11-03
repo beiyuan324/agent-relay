@@ -50,8 +50,8 @@ function resultText(item: Json): string {
   return text(result);
 }
 
-export function ToolActivity({ item, active }: { item: Json; active: boolean }) {
-  const command = item.type === "commandExecution", files = item.type === "fileChange";
+function activityState(item: Json, active: boolean) {
+  const command = item.type === "commandExecution";
   const hasExitCode = command && typeof item.exitCode === "number" && Number.isFinite(item.exitCode);
   // A process can finish with no matches (exit 1) or no stdout. Keep its exit code in the details.
   const failed = !!item.error || (command
@@ -63,6 +63,49 @@ export function ToolActivity({ item, active }: { item: Json; active: boolean }) 
   const ended = !active && !hasExitCode && (item.status === "inProgress" || item.status === "running");
   const completed = item.status === "completed" || item.success === true || hasExitCode;
   const state = failed ? "失败" : running ? "进行中" : rejected ? "已拒绝" : ended ? "已结束" : item.status === "interrupted" ? "已停止" : completed ? "已完成" : "已记录";
+  return { failed, rejected, interrupted, running, ended, state };
+}
+
+function activityCategory(item: Json): string {
+  switch (item.type) {
+    case "commandExecution": return "运行命令";
+    case "fileChange": return "修改文件";
+    case "webSearch": return "搜索网页";
+    case "imageView": return "查看图片";
+    case "collabToolCall":
+    case "collabAgentToolCall": return "执行协作任务";
+    default: {
+      const server = typeof item.server === "string" ? item.server.trim()
+        : typeof item.tool === "string" ? /^mcp__(.+?)__/.exec(item.tool)?.[1] : "";
+      return server ? "使用 " + server.replace(/[_-]/g, " ").replace(/\b[a-z]/g, character => character.toUpperCase()) + " 集成" : "调用工具";
+    }
+  }
+}
+
+export function ToolActivityGroup({ items, active }: { items: Json[]; active: boolean }) {
+  const states = items.map(item => activityState(item, active));
+  const running = states.some(state => state.running);
+  const failed = states.filter(state => state.failed).length;
+  const rejected = states.filter(state => state.rejected).length;
+  const interrupted = states.filter(state => state.interrupted).length;
+  const label = (running ? "正在" : "已") + [...new Set(items.map(activityCategory))].join("、");
+  const status = [running ? "进行中" : "", failed ? `${failed} 项失败` : "", rejected ? `${rejected} 项已拒绝` : "", interrupted ? `${interrupted} 项已停止` : ""].filter(Boolean).join(" · ");
+  const title = `${label} · ${items.length} 次调用${status ? " · " + status : ""}`;
+  return <details className={"tool-activity-group" + (running ? " is-running" : "") + (failed ? " is-failed" : "")}>
+    <summary title={title} aria-label={title}>
+      {running ? <Loader2 size={14} className="spin" /> : failed ? <AlertCircle size={14} /> : <Wrench size={14} />}
+      <span className="activity-title">{label}</span>
+      <span className="activity-group-count">{items.length} 次调用</span>
+      {status && <span className={"activity-group-status" + (failed ? " is-failed" : "")}>{status}</span>}
+      <ChevronDown size={12} className="activity-chevron" />
+    </summary>
+    <div className="activity-group-items">{items.map((item, index) => <ToolActivity key={item.id ?? index} item={item} active={active} />)}</div>
+  </details>;
+}
+
+export function ToolActivity({ item, active }: { item: Json; active: boolean }) {
+  const command = item.type === "commandExecution", files = item.type === "fileChange";
+  const { failed, rejected, running, ended, state } = activityState(item, active);
   const fullCommand = commandText(item), visibleCommand = shellCommand(fullCommand);
   const summaryCommand = visibleCommand.trim().replace(/\s+/g, " ");
   const commandState = failed ? "运行失败" : running ? "正在运行" : rejected ? "已拒绝" : ended ? "已结束" : item.status === "interrupted" ? "已停止" : "已运行";
