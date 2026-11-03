@@ -224,10 +224,13 @@ export default function App() {
         const busy = workbench.isArchiveBusy(thread.id);
         const reason = archived ? "" : workbench.archiveReason(thread);
         const actionLabel = archived ? "恢复会话" : "归档会话";
+        const tooltip = () => {
+          const date = when(thread.updatedAt || thread.createdAt);
+          return [title(thread), date && `更新于：${date}`].filter(Boolean).join("\n");
+        };
         return <div key={thread.id} className={`thread-row ${workbench.selected === thread.id ? "selected" : ""} ${busy ? "is-busy" : ""}`} aria-busy={busy}>
-          <button className={`thread-item ${workbench.selected === thread.id ? "selected" : ""}`} title={title(thread)} disabled={!available || busy} onClick={() => { setError(""); void workbench.open(thread.id, archived); }}>
-            <div className="thread-item-heading"><span className="thread-item-title">{title(thread)}</span><span className="thread-meta">{!archived && thread.status?.type === "active" && <span className="status-dot connected" />}<span>{when(thread.updatedAt || thread.createdAt)}</span></span></div>
-            <div className="thread-preview">{thread.preview || (archived ? "查看历史消息" : "开始新的对话")}</div>
+          <button className={`thread-item ${workbench.selected === thread.id ? "selected" : ""}`} title={tooltip()} onMouseEnter={event => { event.currentTarget.title = tooltip(); }} onFocus={event => { event.currentTarget.title = tooltip(); }} disabled={!available || busy} onClick={() => { setError(""); void workbench.open(thread.id, archived); }}>
+            <div className="thread-item-heading"><span className="thread-item-title">{title(thread)}</span>{!archived && thread.status?.type === "active" && <span className="thread-meta"><span className="status-dot connected" /></span>}</div>
           </button>
           <button className="icon-button thread-archive" title={reason || actionLabel} aria-label={`${actionLabel}：${title(thread)}`} disabled={!available || busy || !!reason} onClick={() => { setError(""); void workbench.changeArchive(thread, !archived); }}>{busy ? <Loader2 size={16} className="spin" /> : archived ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>
         </div>;

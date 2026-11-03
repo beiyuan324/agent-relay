@@ -35,5 +35,12 @@ export function folder(path = "") { return path.replace(/\\/g, "/").split("/").f
 export function when(value: number | string | undefined) {
   if (!value) return "";
   const date = new Date(typeof value === "number" && value < 1e12 ? value * 1000 : value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+  if (Number.isNaN(date.getTime())) return "";
+  const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return "刚刚";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`;
+  if (seconds < 2592000) return `${Math.floor(seconds / 86400)}天前`;
+  if (seconds < 31536000) return `${Math.floor(seconds / 2592000)}个月前`;
+  return `${Math.floor(seconds / 31536000)}年前`;
 }

@@ -198,10 +198,9 @@ input::placeholder,textarea::placeholder { color: var(--tertiary); }
 .thread-row:hover { background: var(--hover); }
 .thread-row.selected { background: var(--surface); border-color: var(--line); box-shadow: 0 2px 5px #00000003; }
 .thread-item-heading { display: contents; }
-.thread-item-title { grid-column: 1 / -1; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.6; }
+.thread-item-title { grid-column: 1; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.6; }
 .thread-item.selected .thread-item-title { color: var(--blue); }
-.thread-preview { grid-column: 1; grid-row: 2; min-width: 0; color: var(--secondary); font-size: 12px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.6; }
-.thread-meta { grid-column: 2; grid-row: 2; display: flex; align-items: center; gap: 4px; margin-top: 4px; font-size: 12px; color: var(--secondary); white-space: nowrap; }
+.thread-meta { grid-column: 2; grid-row: 1; display: flex; align-items: center; gap: 4px; align-self: center; font-size: 12px; color: var(--secondary); white-space: nowrap; }
 .thread-list-empty { text-align: center; padding: 40px 17px; color: var(--tertiary); font-size: 13px; line-height: 1.9; }
 .list-loading { padding: 20px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--secondary); font-size: 13px; }
 .thread-sidebar-footer { border-top: 1px solid var(--line); padding: 8px 15px 8px 21px; display: flex; align-items: center; justify-content: space-between; color: var(--tertiary); font-size: 12px; min-height: 43px; }
