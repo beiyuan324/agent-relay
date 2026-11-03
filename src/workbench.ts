@@ -161,14 +161,16 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     try {
       const result = await call(target, "thread/list", { cursor, limit: 40, sortKey: "updated_at", archived, ...(term ? { searchTerm: term } : {}) });
       if (!current()) return;
-      const data: Json[] = (result.data || []).map((thread: Json) => ({ ...thread, relayArchived: archived }));
+      const data: Json[] = (result.data || [])
+        .filter((thread: Json) => archived || newThreads.current[keyOf(target, thread.id)]?.relayHistoryPending !== true)
+        .map((thread: Json) => ({ ...thread, relayArchived: archived }));
       for (const thread of data) {
         archiveFlags.current[keyOf(target, thread.id)] = archived;
         if (!archived) delete newThreads.current[keyOf(target, thread.id)];
       }
       const query = term.toLocaleLowerCase();
       const pending = archived ? [] : Object.entries(newThreads.current)
-        .filter(([key, thread]) => JSON.parse(key)[0] === target && (!query || [thread.name, thread.preview, thread.cwd].some(value => typeof value === "string" && value.toLocaleLowerCase().includes(query))))
+        .filter(([key, thread]) => JSON.parse(key)[0] === target && thread.relayHistoryPending === false && (!query || [thread.name, thread.preview, thread.cwd].some(value => typeof value === "string" && value.toLocaleLowerCase().includes(query))))
         .map(([, thread]) => thread);
       rows(previous => {
         const listed = cursor ? [...previous, ...data.filter(thread => !previous.some(row => row.id === thread.id))] : data;
@@ -190,7 +192,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       const restore = selection.current[device];
       active.current = { ...active.current, selected: restore?.id || null, archiveExpanded: false };
       setArchiveExpanded(false);
-      setThreads(Object.entries(newThreads.current).filter(([key]) => JSON.parse(key)[0] === device).map(([, thread]) => thread)); setSelected(restore?.id || null); setEnvironment(null); setModels([]); setPermissions(null); setSearch(""); setNextCursor(null); setOlderCursor(null); setSending(false);
+      setThreads(Object.entries(newThreads.current).filter(([key, thread]) => JSON.parse(key)[0] === device && thread.relayHistoryPending === false).map(([, thread]) => thread)); setSelected(restore?.id || null); setEnvironment(null); setModels([]); setPermissions(null); setSearch(""); setNextCursor(null); setOlderCursor(null); setSending(false);
       setArchivedThreads([]); setArchivedNextCursor(null); setArchivedError("");
     }
     ++listEpoch.current; ++archivedListEpoch.current; ++openEpoch.current;
@@ -274,16 +276,19 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       let result: Json | undefined;
       let resumeError = "", historyError = "";
       try {
-        result = await call(target, archived ? "thread/read" : "thread/resume", { threadId: id, ...(archived ? { includeTurns: false } : {}) });
+        const draft = newThreads.current[key];
+        result = !archived && draft?.relayDraft
+          ? { thread: draft, relayHistoryPending: true, model: draft.relayModel }
+          : await call(target, archived ? "thread/read" : "thread/resume", { threadId: id, ...(archived ? { includeTurns: false } : {}) });
         if (!result?.thread) throw new Error("Codex 返回了无效的会话数据，请检查版本兼容性");
       } catch (error) { result = undefined; if (!archived) resumeError = message(error); }
       if (!current()) return;
       let thread: Json = result?.thread || { ...summary, id };
       let cursor: string | null = null;
       if (result?.relayHistoryPending === true) {
-        // thread/start already loaded this session; there is no rollout to read yet.
+        // Local drafts and newly started sessions have no persisted history yet.
+        thread = { ...newThreads.current[key], ...thread };
         newThreads.current[key] = { ...thread, relayHistoryPending: true };
-        setThreads(previous => [thread, ...previous.filter(row => row.id !== id)]);
         setCache(previous => ({ ...previous, [key]: { ...previous[key], ...thread, turns: previous[key]?.turns || [], interrupted: false } }));
         resumed.current.add(key);
         setPermissions({ approvalPolicy: result.approvalPolicy, sandbox: result.sandbox, model: result.model, reasoningEffort: result.reasoningEffort });
@@ -380,6 +385,15 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     setListRevision(previous => previous + 1);
   }, []);
 
+  const materializeThread = useCallback((target: string, id: string) => {
+    const key = keyOf(target, id);
+    const pending = newThreads.current[key];
+    if (!pending || pending.relayDraft || archiveFlags.current[key] === true) return;
+    const thread = { ...pending, relayHistoryPending: false };
+    newThreads.current[key] = thread;
+    if (target === active.current.device) setThreads(previous => [thread, ...previous.filter(row => row.id !== id)]);
+  }, []);
+
   const event = useCallback((event: RelayEvent) => {
     if (event.type !== "codex" || typeof event.device !== "string" || typeof event.message !== "object") return;
     const target = event.device;
@@ -392,7 +406,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       const endedAt = Date.now();
       const discarded = new Set<string>();
       for (const [key, thread] of Object.entries(newThreads.current)) {
-        if (JSON.parse(key)[0] === target && thread.relayHistoryPending === true) {
+        if (JSON.parse(key)[0] === target && thread.relayHistoryPending === true && !thread.relayDraft) {
           discarded.add(thread.id);
           delete newThreads.current[key];
         }
@@ -400,11 +414,11 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       if (active.current.device === target) setThreads(previous => previous.filter(thread => !discarded.has(thread.id)));
       for (const key of resumed.current) if (JSON.parse(key)[0] === target) resumed.current.delete(key);
       setSessions(previous => Object.fromEntries(Object.entries(previous).map(([key, session]) =>
-        [key, JSON.parse(key)[0] === target ? { ...session, ready: false, resumeError: archiveFlags.current[key] ? undefined : p.reason || "Codex 进程已退出，请重试接续" } : session])));
+        [key, JSON.parse(key)[0] === target && !newThreads.current[key]?.relayDraft ? { ...session, ready: false, resumeError: archiveFlags.current[key] ? undefined : p.reason || "Codex 进程已退出，请重试接续" } : session])));
       if (active.current.device === target) { ++openEpoch.current; setOpening(false); setPermissions(null); }
       setRequests(previous => ({ ...previous, [target]: [] }));
       setCache(previous => Object.fromEntries(Object.entries(previous).map(([key, thread]) => {
-        if (JSON.parse(key)[0] !== target) return [key, thread];
+        if (JSON.parse(key)[0] !== target || thread.relayDraft) return [key, thread];
         return [key, { ...thread, interrupted: true, turns: (thread.turns || []).map((turn: Json) => turn.status === "inProgress" ? { ...turn, status: "interrupted", relayTiming: { ...turn.relayTiming, completedAtMs: endedAt } } : turn) }];
       })));
       if (active.current.device === target) onErrorRef.current(p.reason || "Codex 进程已退出，请刷新会话");
@@ -433,9 +447,16 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       applyArchiveState(target, id, value.method === "thread/archived");
       return;
     }
-    if (value.method === "turn/started" && newThreads.current[key]) newThreads.current[key].relayHistoryPending = false;
-    if (value.method === "thread/started" && p.thread && newThreads.current[key]) newThreads.current[key] = { ...newThreads.current[key], ...p.thread };
-    if (target === active.current.device && archiveFlags.current[key] !== true && value.method === "thread/started" && p.thread) {
+    if (value.method === "turn/started") {
+      materializeThread(target, id);
+      if (target === active.current.device && !newThreads.current[key] && !listed.current.some(thread => thread.id === id)) setListRevision(previous => previous + 1);
+    }
+    if (value.method === "thread/started" && p.thread && newThreads.current[key]) {
+      const pending = newThreads.current[key];
+      newThreads.current[key] = { ...pending, ...p.thread, preview: p.thread.preview || pending.preview };
+    }
+    const hasConversation = newThreads.current[key]?.relayHistoryPending !== true && (p.thread?.preview?.trim() || p.thread?.turns?.length || cached.current[key]?.turns?.length);
+    if (target === active.current.device && archiveFlags.current[key] !== true && value.method === "thread/started" && p.thread && hasConversation) {
       setThreads(previous => [p.thread, ...previous.filter(t => t.id !== p.thread.id)]);
     }
     if (!cached.current[key] && key !== keyOf(active.current.device, active.current.selected || "")) return;
@@ -453,7 +474,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         timer: window.setTimeout(flushEvents, 100),
       };
     }
-  }, [applyArchiveState, flushEvents, recordApproval, setCache]);
+  }, [applyArchiveState, flushEvents, materializeThread, recordApproval, setCache]);
 
   const archiveReason = (thread: Json): string => {
     const key = keyOf(device, thread.id);
@@ -492,45 +513,72 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const create = async (cwd: string, model: string, expectedDevice: string, projectId?: string) => {
     const target = active.current.device;
     if (target !== expectedDevice || !active.current.available) throw new Error("执行电脑已切换或离线，请重新选择设备后新建会话");
-    const epoch = openEpoch.current;
-    const generation = processEpoch.current[target] || 0;
-    const result = await call(target, "thread/start", { cwd, ...(model ? { model } : {}), ...(projectId ? { projectId } : {}) });
-    if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，新建会话尚未保存，请重新新建会话");
-    const thread = result.thread;
-    if (!thread?.id) throw new Error("Codex 返回了无效的会话数据");
-    const key = keyOf(target, thread.id);
-    newThreads.current[key] = { ...thread, relayHistoryPending: true };
-    setCache(previous => ({ ...previous, [key]: { ...previous[key], ...thread, turns: previous[key]?.turns || thread.turns || [] } }));
-    if (target !== active.current.device) return;
-    if (epoch !== openEpoch.current || !active.current.available) {
-      setThreads(previous => [thread, ...previous.filter(t => t.id !== thread.id)]);
-      return;
-    }
-    ++openEpoch.current; ++listEpoch.current;
-    setListRevision(previous => previous + 1);
-    active.current = { ...active.current, selected: thread.id };
-    setLoading(false); setNextCursor(null);
-    setThreads(previous => [thread, ...previous.filter(t => t.id !== thread.id)]);
+    if (sendingRef.current) throw new Error("正在发送消息，请稍候");
+    const existing = Object.entries(newThreads.current).find(([key, thread]) =>
+      JSON.parse(key)[0] === target && thread.relayHistoryPending === true && thread.cwd === cwd && (thread.projectId || "") === (projectId || ""));
+    if (existing) { await open(existing[1].id); return; }
+    const id = "draft:" + crypto.randomUUID();
+    const thread: Json = { id, cwd, ...(projectId ? { projectId } : {}), turns: [], relayDraft: true, relayDraftId: id, relayModel: model, relayHistoryPending: true };
+    const key = keyOf(target, id);
+    newThreads.current[key] = thread;
+    ++openEpoch.current;
+    active.current = { ...active.current, selected: id };
+    setCache(previous => ({ ...previous, [key]: thread }));
     selection.current[target] = { id: thread.id, archived: false };
     resumed.current.add(key);
     setSelected(thread.id); setOpening(false); setSearch(""); setOlderCursor(null);
-    setPermissions({ approvalPolicy: result.approvalPolicy, sandbox: result.sandbox, model: result.model, reasoningEffort: result.reasoningEffort });
+    setPermissions({ model });
     setSessions(previous => ({ ...previous, [key]: { ready: true } }));
   };
   const send = async (draft: ComposerDraft, model: string, effort: string): Promise<boolean> => {
-    const { device: target, selected: id, available } = active.current;
-    if (!id || !available || !resumed.current.has(keyOf(target, id)) || archiveFlags.current[keyOf(target, id)] === true || archiveMutations.current.has(keyOf(target, id)) || !draft.text.trim() || sendingRef.current) return false;
+    const { device: target, selected: selectedId, available } = active.current;
+    let id = selectedId;
+    if (!id || !available || (!newThreads.current[keyOf(target, id)]?.relayDraft && !resumed.current.has(keyOf(target, id))) || archiveFlags.current[keyOf(target, id)] === true || archiveMutations.current.has(keyOf(target, id)) || !draft.text.trim() || sendingRef.current) return false;
     sendingRef.current = true; setSending(true);
     const submittedAt = Date.now();
     const generation = processEpoch.current[target] || 0;
     try {
+      const draftKey = keyOf(target, id);
+      const pendingDraft = newThreads.current[draftKey];
+      if (pendingDraft?.relayDraft) {
+        const created = await call(target, "thread/start", { cwd: pendingDraft.cwd, ...(model ? { model } : {}), ...(pendingDraft.projectId ? { projectId: pendingDraft.projectId } : {}) });
+        if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，请重新发送消息");
+        if (!created.thread?.id) throw new Error("Codex 返回了无效的会话数据");
+        id = created.thread.id as string;
+        const key = keyOf(target, id);
+        const thread = { ...pendingDraft, ...created.thread, preview: created.thread.preview || draft.text.trim(), relayDraft: false, relayDraftId: pendingDraft.relayDraftId, relayHistoryPending: true };
+        newThreads.current[key] = thread;
+        delete newThreads.current[draftKey];
+        resumed.current.delete(draftKey);
+        resumed.current.add(key);
+        if (selection.current[target]?.id === selectedId) selection.current[target] = { id, archived: false };
+        if (target === active.current.device && active.current.selected === selectedId) {
+          ++openEpoch.current;
+          active.current = { ...active.current, selected: id };
+          setSelected(id); setOpening(false);
+          setPermissions({ approvalPolicy: created.approvalPolicy, sandbox: created.sandbox, model: created.model, reasoningEffort: created.reasoningEffort });
+        }
+        setCache(previous => {
+          const next = { ...previous, [key]: thread };
+          delete next[draftKey];
+          return next;
+        });
+        setSessions(previous => {
+          const next = { ...previous, [key]: { ready: true } };
+          delete next[draftKey];
+          return next;
+        });
+      }
       const result = await call(target, "turn/start", {
         threadId: id, input: referenceInput(draft),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       });
       if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，请重新读取会话确认提交状态");
       const key = keyOf(target, id);
-      if (result.turn && newThreads.current[key]) newThreads.current[key].relayHistoryPending = false;
+      if (result.turn?.id) {
+        if (newThreads.current[key] && !newThreads.current[key].preview) newThreads.current[key].preview = draft.text.trim();
+        materializeThread(target, id);
+      }
       if (result.turn) setCache(previous => {
         const thread = previous[key]; if (!thread) return previous;
         const existing = (thread.turns || []).find((turn: Json) => turn.id === result.turn.id);

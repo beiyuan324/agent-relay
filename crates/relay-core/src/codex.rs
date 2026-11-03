@@ -95,6 +95,9 @@ impl Codex {
         let mut cmd = if executable.extension().is_some_and(|v| v.to_string_lossy().eq_ignore_ascii_case("js")) {
             let mut cmd = Command::new(tokio::task::spawn_blocking(crate::discovery::node_executable).await??); cmd.arg(&executable); cmd
         } else { Command::new(&executable) };
+        let tool_executable = executable.clone();
+        let path = tokio::task::spawn_blocking(move || crate::discovery::command_path(&tool_executable)).await??;
+        cmd.env("PATH", path);
         cmd.arg("app-server").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
         #[cfg(windows)] cmd.creation_flags(0x08000000);
         let mut child = match cmd.spawn() {

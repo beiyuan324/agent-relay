@@ -335,6 +335,8 @@ a.message-reference:hover { background: color-mix(in srgb,var(--blue) 20%,var(--
 .reasoning>summary:hover, .tool-activity>summary:hover { color: var(--text); background: var(--hover); }
 .reasoning>summary:focus-visible, .tool-activity>summary:focus-visible { outline-offset: -2px; }
 .reasoning-title, .activity-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.web-search-activity { display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 3px 2px; font-size: 13px; line-height: 20px; }
+.web-search-activity>svg { flex-shrink: 0; }
 .activity-chevron { color: var(--tertiary); transition: transform .16s, opacity .16s; }
 .tool-activity:not([open])>summary .activity-chevron { opacity: 0; }
 .tool-activity>summary:hover .activity-chevron, .tool-activity>summary:focus-visible .activity-chevron { opacity: 1; }
@@ -406,6 +408,13 @@ a.message-reference:hover { background: color-mix(in srgb,var(--blue) 20%,var(--
 .composer-selectors select { border: 1px solid var(--line); background: var(--surface-muted); border-radius: 6px; padding: 6px 8px; height: var(--control-height); min-width: 0; font-size: var(--font-control); max-width: min(260px,100%); color: var(--text); text-overflow: ellipsis; }
 .composer-selectors select:first-child { flex: 1 1 160px; }
 .composer-selectors select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.composer-actions { display: flex; align-items: center; gap: 8px; }
+.context-usage { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: var(--control-height); flex-shrink: 0; color: var(--secondary); border-radius: 6px; outline-offset: 2px; }
+.context-usage.is-full { color: var(--warning); }
+.context-usage-track { opacity: .22; }
+.context-usage-tooltip { position: absolute; z-index: 35; right: 0; bottom: calc(100% + 8px); display: flex; flex-direction: column; gap: 4px; width: max-content; max-width: min(260px,calc(100vw - 40px)); padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--secondary); box-shadow: var(--shadow); font-size: 12px; line-height: 1.6; text-align: center; pointer-events: none; visibility: hidden; opacity: 0; transition: opacity .12s; }
+.context-usage-tooltip strong { font-weight: 500; color: var(--text); }
+.context-usage:hover .context-usage-tooltip, .context-usage:focus .context-usage-tooltip { visibility: visible; opacity: 1; }
 .send-button { display: grid; place-items: center; color: white; background: #1674ef; border-radius: 50%; width: var(--control-height); height: var(--control-height); flex-shrink: 0; }
 .send-button:hover:not(:disabled) { background: #0868e5; }
 .send-button:disabled { background: var(--surface-muted); color: var(--tertiary); opacity: 1; }

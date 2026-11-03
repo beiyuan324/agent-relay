@@ -47,6 +47,10 @@ export function applyEvent(previous: Json, event: Json, receivedAt = Date.now())
   const next: Json = { ...previous, turns: [...(previous.turns || [])] };
   if (method === "thread/started" && p.thread) return { ...next, ...p.thread };
   if (method === "thread/status/changed") { next.status = p.status; return next; }
+  if (method === "thread/tokenUsage/updated") {
+    next.tokenUsage = p.tokenUsage;
+    return next;
+  }
   const turnId = p.turnId || p.turn?.id;
   if (!turnId) return next;
   let index = next.turns.findIndex((turn: Json) => turn.id === turnId);
@@ -84,6 +88,7 @@ export function applyEvent(previous: Json, event: Json, receivedAt = Date.now())
 
 export function mergeLive(history: Json, live: Json | undefined, touched: Set<string>): Json {
   if (!live) return history;
+  history = { ...history, tokenUsage: live.tokenUsage ?? history.tokenUsage };
   const liveTurns = new Map<string, Json>((live.turns || []).map((turn: Json) => [turn.id, turn]));
   const turns = (history.turns || []).map((turn: Json) => {
     const timing = liveTurns.get(turn.id)?.relayTiming;

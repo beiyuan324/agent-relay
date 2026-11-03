@@ -15,7 +15,7 @@ async function availableApps(device: string, threadId: string, refresh: boolean,
   const apps: MentionTarget[] = [], seen = new Set<string>();
   let cursor: string | null = null;
   do {
-    const result: Json = await call(device, "app/list", { cursor, limit: 100, threadId, forceRefetch: refresh });
+    const result: Json = await call(device, "app/list", { cursor, limit: 100, ...(threadId ? { threadId } : {}), forceRefetch: refresh });
     if (stopped()) return [];
     if (!Array.isArray(result.data)) throw new Error("Codex 返回了无效的应用列表");
     for (const app of result.data) {

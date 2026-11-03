@@ -22,10 +22,17 @@ function toolArguments(item: Json): Json {
 }
 function toolName(item: Json): string {
   const args = toolArguments(item);
+  if (item.type === "webSearch") {
+    const action = item.action || {};
+    const queries = [item.query, ...(Array.isArray(action.queries) ? action.queries : []), action.query]
+      .filter((query): query is string => typeof query === "string" && !!query.trim());
+    const detail = [...new Set(queries)].join("；") || action.url || "";
+    const label = action.type === "openPage" ? "打开网页" : action.type === "findInPage" ? "查找网页" : "搜索网页";
+    return label + (detail ? " · " + detail : "");
+  }
   for (const candidate of [item.title, args.title, args.description]) {
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
-  if (item.type === "webSearch") return "搜索网页" + (typeof item.query === "string" ? " · " + item.query : "");
   if (item.type === "imageView") return "查看图片" + (typeof item.path === "string" ? " · " + item.path : "");
   if (item.type === "collabToolCall" || item.type === "collabAgentToolCall") return "协作 · " + (item.tool || "代理任务");
   if (item.type === "functionCallOutput") return "工具输出";
@@ -45,11 +52,16 @@ function resultText(item: Json): string {
 
 export function ToolActivity({ item, active }: { item: Json; active: boolean }) {
   const command = item.type === "commandExecution", files = item.type === "fileChange";
-  const failed = !!item.error || item.success === false || item.status === "failed" || item.status === "error" || (command && typeof item.exitCode === "number" && item.exitCode !== 0);
-  const running = active && !failed && (item.status === "inProgress" || item.status === "running" || (item.status == null && item.exitCode == null && item.success == null));
-  const ended = !active && (item.status === "inProgress" || item.status === "running");
+  const hasExitCode = command && typeof item.exitCode === "number" && Number.isFinite(item.exitCode);
+  // A process can finish with no matches (exit 1) or no stdout. Keep its exit code in the details.
+  const failed = !!item.error || (command
+    ? !hasExitCode && (item.success === false || item.status === "error" || item.status === "failed")
+    : item.success === false || item.status === "error" || item.status === "failed");
   const rejected = item.status === "declined" || item.status === "denied";
-  const completed = item.status === "completed" || item.success === true || (command && item.exitCode === 0);
+  const interrupted = item.status === "interrupted";
+  const running = active && !failed && !rejected && !interrupted && !hasExitCode && (item.status === "inProgress" || item.status === "running" || (item.status == null && item.success == null));
+  const ended = !active && !hasExitCode && (item.status === "inProgress" || item.status === "running");
+  const completed = item.status === "completed" || item.success === true || hasExitCode;
   const state = failed ? "失败" : running ? "进行中" : rejected ? "已拒绝" : ended ? "已结束" : item.status === "interrupted" ? "已停止" : completed ? "已完成" : "已记录";
   const fullCommand = commandText(item), visibleCommand = shellCommand(fullCommand);
   const summaryCommand = visibleCommand.trim().replace(/\s+/g, " ");
@@ -60,6 +72,10 @@ export function ToolActivity({ item, active }: { item: Json; active: boolean }) 
   const known = command || files || ["mcpToolCall", "dynamicToolCall", "webSearch", "imageView", "collabToolCall", "collabAgentToolCall", "functionCallOutput"].includes(item.type);
   const input = item.arguments ?? item.action ?? item.path;
   const result = resultText(item);
+  if (item.type === "webSearch") return <div className={"tool-activity web-search-activity" + (running ? " is-running" : "")} title={title} aria-label={title + "，" + state}>
+    {running ? <Loader2 size={14} className="spin" /> : <Globe2 size={14} />}
+    <span className="activity-title">{title}</span>
+  </div>;
   return <details className={"tool-activity" + (failed ? " is-failed" : "") + (running ? " is-running" : "")}>
     <summary title={title + (item.server ? " · " + item.server : "")} aria-label={title + "，" + state}>
       {running ? <Loader2 size={14} className="spin" /> : failed ? <AlertCircle size={14} /> : <Icon size={14} />}

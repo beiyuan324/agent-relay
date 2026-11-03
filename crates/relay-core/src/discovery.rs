@@ -1,7 +1,7 @@
 //! Locate installed Codex entry points without launching processes or scanning whole drives.
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use serde::Serialize;
-use std::{collections::HashSet, path::{Path, PathBuf}, time::SystemTime};
+use std::{collections::HashSet, ffi::OsString, path::{Path, PathBuf}, time::SystemTime};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,6 +169,29 @@ pub fn search_paths() -> Vec<PathBuf> {
         }
     }
     paths
+}
+
+/// Preserve PATH precedence and append tools bundled with the selected Codex installation.
+pub fn command_path(executable: &Path) -> Result<OsString> {
+    let mut paths = search_paths();
+    let rg = if cfg!(windows) { "rg.exe" } else { "rg" };
+    if let Some(directory) = executable.parent() {
+        let mut bundled = vec![directory.join("codex-path"), directory.to_path_buf()];
+        // Native npm packages keep helper binaries next to the codex directory.
+        if let Some(parent) = directory.parent() {
+            if directory.file_name().is_some_and(|name| name == "codex") {
+                bundled.push(parent.join("path"));
+            }
+        }
+        paths.extend(bundled.into_iter().filter(|path| path.is_absolute() && path.join(rg).is_file()));
+    }
+    let mut seen = HashSet::new();
+    paths.retain(|path| {
+        let key = path.as_os_str().to_os_string();
+        let key = if cfg!(windows) { OsString::from(key.to_string_lossy().to_lowercase()) } else { key };
+        seen.insert(key)
+    });
+    std::env::join_paths(paths).context("无法为 Codex 配置命令搜索路径，请检查 PATH 中是否包含无效字符")
 }
 
 #[cfg(windows)]
