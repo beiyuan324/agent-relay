@@ -629,7 +629,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         if (!created.thread?.id) throw new Error("Codex 返回了无效的会话数据");
         id = created.thread.id as string;
         const key = keyOf(target, id);
-        const thread = { ...pendingDraft, ...created.thread, preview: created.thread.preview || draft.text.trim(), relayDraft: false, relayDraftId: pendingDraft.relayDraftId, relayHistoryPending: true };
+        const thread = { ...pendingDraft, ...created.thread, relayMode: cached.current[draftKey]?.relayMode ?? collaborationMode, relayServiceTier: cached.current[draftKey]?.relayServiceTier ?? serviceTier, preview: created.thread.preview || draft.text.trim(), relayDraft: false, relayDraftId: pendingDraft.relayDraftId, relayHistoryPending: true };
         newThreads.current[key] = thread;
         delete newThreads.current[draftKey];
         resumed.current.delete(draftKey);
@@ -781,12 +781,14 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     const current = active.current;
     if (!current.selected) return;
     const key = keyOf(current.device, current.selected);
+    if (newThreads.current[key]) newThreads.current[key] = { ...newThreads.current[key], relayMode: mode };
     setCache(previous => ({ ...previous, [key]: { ...previous[key], relayMode: mode } }));
   };
   const setServiceTier = (tier: string) => {
     const current = active.current;
     if (!current.selected) return;
     const key = keyOf(current.device, current.selected);
+    if (newThreads.current[key]) newThreads.current[key] = { ...newThreads.current[key], relayServiceTier: tier };
     setCache(previous => ({ ...previous, [key]: { ...previous[key], relayServiceTier: tier } }));
   };
 

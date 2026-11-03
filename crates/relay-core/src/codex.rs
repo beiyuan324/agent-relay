@@ -499,9 +499,12 @@ impl Client {
         if let Some(session) = pending { return Ok(session); }
         // Rejoin the thread to recover host permissions and subscriptions, without
         // hydrating its entire history before the bounded turns/list request.
+        let observed_active = lock(&self.active).get(id).cloned();
         let result = self.request("thread/resume",json!({"threadId":id,"excludeTurns":true})).await.map_err(|error| anyhow!("无法接续此会话：{error:#}"))?;
         ensure!(!self.ended.is_cancelled(), "Codex 进程连接已结束");
         let mut active = lock(&self.active);
+        // Turn notifications received during resume are newer than its snapshot.
+        if active.get(id).cloned() != observed_active { return Ok(result); }
         if !active.get(id).is_some_and(|turn| turn.as_str() == "relay:pending-command") { active.remove(id); }
         if result["thread"]["status"]["type"]=="active" { active.insert(id.into(),String::new()); }
         if let Some(turns) = result["thread"]["turns"].as_array() {

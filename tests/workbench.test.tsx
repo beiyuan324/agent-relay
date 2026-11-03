@@ -98,18 +98,23 @@ it("rejects older-page responses after reopening the same session", async () => 
 });
 it("does not reintroduce a stale submitted turn after process exit", async () => {
   const submitted = deferred();
+  rpc.mockImplementation(async (_device: string, method: string, params: Json) => {
+    if (method === "thread/resume") return { thread: { id: params.threadId } };
+    if (method === "thread/turns/list") return { data: [{ id: "previous", status: "completed", items: [] }] };
+    if (method === "turn/start") return submitted.promise;
+    return { data: [], requests: [] };
+  });
   const { result } = renderHook(() => useWorkbench("local", true, vi.fn()));
   await settle();
   await act(async () => { await result.current.open("thread"); });
-  rpc.mockImplementation(async (_device: string, method: string) => method === "turn/start" ? submitted.promise : {});
-  let sending!: Promise<boolean>;
-  act(() => { sending = result.current.send({ text: "hello", mentions: [] }, "", ""); });
+  await act(async () => { expect(await result.current.send({ text: "hello", mentions: [] }, "", "")).toBe(true); });
+  expect(rpc.mock.calls.some(([, method]) => method === "turn/start")).toBe(true);
   act(() => { result.current.event(event("relay/codexExited")); });
-  let accepted = true;
-  await act(async () => { submitted.resolve({ turn: { id: "stale", status: "inProgress", items: [] } }); accepted = await sending; });
-  expect(accepted).toBe(false);
+  await act(async () => { submitted.resolve({ turn: { id: "stale", status: "inProgress", items: [] } }); });
   expect(result.current.thread?.turns.some((turn: Json) => turn.id === "stale")).toBe(false);
   expect(result.current.thread?.interrupted).toBe(true);
+  expect(result.current.queue[0]?.status).toBe("failed");
+  expect(result.current.queuePaused).toBeTruthy();
 });
 it("merges queued deltas before completing a history read", async () => {
   const history = deferred();
