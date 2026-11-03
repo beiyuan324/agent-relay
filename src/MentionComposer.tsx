@@ -1,8 +1,10 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { AtSign, Blocks, File, Folder, Loader2, RefreshCw, Sparkles, X } from "lucide-react";
+import { AtSign, Blocks, File, Folder, Loader2, RefreshCw, Slash, Sparkles, X } from "lucide-react";
 import { call, folder, message, type Json } from "./api";
 import { editDraft, fileTarget, insertMention, matchesMention, mentionTrigger, removeMention, validMentions, type ComposerDraft, type MentionKind, type MentionTarget } from "./mentions";
+
+import { matchesCommand, slashTrigger, type SlashCommand } from "./slash-commands";
 
 const labels: Record<MentionKind, string> = { file: "文件", directory: "目录", skill: "技能", app: "应用" };
 const tabs = [{ id: "all", label: "全部" }, { id: "files", label: "文件" }, { id: "apps", label: "应用" }] as const;
@@ -45,16 +47,18 @@ async function availableSkills(device: string, cwd: string, refresh: boolean): P
   return { skills, errors };
 }
 
-export function MentionComposer({ device, threadId, cwd, deviceName, enabled, draft, onChange, inputRef, onSend, placeholder }: {
+export function MentionComposer({ device, threadId, cwd, deviceName, enabled, draft, onChange, inputRef, onSend, placeholder, commands = [], commandError, onCommand, onTogglePlan }: {
   device: string; threadId: string; cwd: string; deviceName: string; enabled: boolean;
   draft: ComposerDraft; onChange: (draft: ComposerDraft) => void; inputRef: RefObject<HTMLTextAreaElement | null>;
   onSend: () => void; placeholder: string;
+  commands?: SlashCommand[]; commandError?: string; onCommand?: (command: SlashCommand) => void; onTogglePlan?: () => void;
 }) {
   const [caret, setCaret] = useState({ start: draft.text.length, end: draft.text.length });
   const [dismissed, setDismissed] = useState("");
   const [composing, setComposing] = useState(false);
   const [tab, setTab] = useState<Tab>("all");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [slashIndex, setSlashIndex] = useState(0);
   const [revision, setRevision] = useState(0);
   const [catalog, setCatalog] = useState<Catalog>({ apps: [], skills: [], errors: [], loading: false });
   const [files, setFiles] = useState<MentionTarget[]>([]);
@@ -66,13 +70,20 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
   const anchor = useRef<HTMLDivElement>(null);
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({ visibility: "hidden" });
   const menuId = useId();
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    if (input) setCaret(previous => previous.start === input.selectionStart && previous.end === input.selectionEnd ? previous : { start: input.selectionStart, end: input.selectionEnd });
+  }, [draft.text, inputRef]);
   const trigger = mentionTrigger(draft, caret.start, caret.end);
-  const open = enabled && !composing && !!trigger && dismissed !== trigger.key;
+  const slash = slashTrigger(draft, caret.start, caret.end);
+  const slashOpen = enabled && !composing && !!slash && dismissed !== slash.key && !!onCommand;
+  const open = enabled && !composing && !slashOpen && !!trigger && dismissed !== trigger.key;
+  const popupOpen = open || slashOpen;
   const query = trigger?.query || "";
-  const skillsOnly = trigger?.prefix === "$";
+  const skillsOnly = trigger?.prefix === "$" || slashOpen;
 
   useLayoutEffect(() => {
-    if (!open || !anchor.current) return;
+    if (!popupOpen || !anchor.current) return;
     const element = anchor.current;
     const update = () => {
       const rect = element.getBoundingClientRect();
@@ -93,10 +104,10 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
       window.removeEventListener("resize", update);
       window.removeEventListener("scroll", update, true);
     };
-  }, [open]);
+  }, [popupOpen]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!popupOpen) return;
     const key = JSON.stringify([device, threadId, cwd, revision, skillsOnly]);
     if (catalogCache.current?.key === key) { setCatalog(catalogCache.current.value); return; }
     let stopped = false;
@@ -120,7 +131,7 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
       setCatalog(value);
     });
     return () => { stopped = true; };
-  }, [open, device, threadId, cwd, revision, skillsOnly]);
+  }, [popupOpen, device, threadId, cwd, revision, skillsOnly]);
 
   useEffect(() => {
     setFiles([]); setFileError(""); setFileLoading(false);
@@ -156,6 +167,16 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
     if (open) list.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
   }, [activeIndex, open]);
 
+  const slashOptions = useMemo(() => [
+    ...commands.filter(command => matchesCommand(command, slash?.query || "")).map(command => ({ key: command.id, command, target: null as MentionTarget | null })),
+    ...catalog.skills.filter(target => matchesMention(target, slash?.query || "")).map(target => ({ key: "skill:" + target.path, command: null as SlashCommand | null, target })),
+  ].slice(0, 100), [commands, catalog.skills, slash?.query]);
+  useEffect(() => { setSlashIndex(0); }, [slash?.query, device, threadId]);
+  const selectedSlashIndex = Math.min(slashIndex, Math.max(0, slashOptions.length - 1));
+  useEffect(() => {
+    if (slashOpen) list.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [selectedSlashIndex, slashOpen]);
+
   const focusAt = (position: number) => {
     setCaret({ start: position, end: position });
     window.requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(position, position); });
@@ -164,6 +185,17 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
     if (!trigger) return;
     const next = insertMention(draft, trigger.start, trigger.end, target);
     onChange(next.draft); setDismissed(""); focusAt(next.caret);
+  };
+  const chooseSlash = (index: number) => {
+    const option = slashOptions[index];
+    if (!slash || !option || option.command?.disabledReason) return;
+    if (option.target) {
+      const next = insertMention(draft, slash.start, slash.end, option.target);
+      onChange(next.draft); setDismissed(""); focusAt(next.caret);
+    } else if (option.command) {
+      setDismissed(slash.key);
+      onCommand?.(option.command);
+    }
   };
   const loading = skillsOnly ? catalog.loading : ((tab === "all" || tab === "files") && fileLoading) || (tab !== "files" && catalog.loading);
   const errors = [...(!skillsOnly && (tab === "all" || tab === "files") && fileError ? ["文件：" + fileError] : []), ...(skillsOnly || tab !== "files" ? catalog.errors : [])];
@@ -174,6 +206,21 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
     setDismissed(""); focusAt(start + prefix.length);
   };
   return <div className="mention-composer" ref={anchor}>
+    {slashOpen && createPortal(<div className="mention-menu slash-menu" style={menuStyle}>
+      <div className="mention-menu-heading"><Slash size={15} /><strong>命令与技能</strong><span title={deviceName}>{deviceName}</span></div>
+      <div className="mention-options" id={menuId} role="listbox" aria-label="选择命令或技能" ref={list}>
+        {slashOptions.map((option, index) => <button type="button" role="option" aria-selected={index === selectedSlashIndex} aria-disabled={!!option.command?.disabledReason} data-active={index === selectedSlashIndex} id={menuId + "-" + index} className={"mention-option " + (index === selectedSlashIndex ? "active" : "")} key={option.key} title={option.command?.disabledReason || option.command?.description || option.target?.detail} onMouseDown={event => event.preventDefault()} onMouseMove={() => setSlashIndex(index)} onClick={() => chooseSlash(index)}>
+          <span className="mention-option-icon">{option.target ? <Sparkles size={16} /> : <Slash size={16} />}</span>
+          <span className="mention-option-copy"><strong>{option.command ? "/" + option.command.id : "/" + option.target!.name}<span className="slash-command-label">{option.command?.label}</span></strong><small>{option.command?.disabledReason || option.command?.description || option.target?.detail}</small></span>
+          <span className="mention-kind">{option.target ? "技能" : "命令"}</span>
+        </button>)}
+        {!slashOptions.length && <div className="mention-empty">没有匹配的命令或技能。按 Esc 关闭并继续编辑。</div>}
+        {catalog.loading && <div className="mention-loading"><Loader2 size={14} className="spin" />正在读取项目技能…</div>}
+      </div>
+      {!!catalog.errors.length && <div className="mention-search-hint" role="status">{catalog.errors.join("；")}</div>}
+      {commandError && <div className="mention-search-hint" role="status">自定义命令：{commandError}</div>}
+      <div className="mention-menu-footer">↑↓ 选择 · Enter / Tab 执行 · Esc 关闭</div>
+    </div>, document.body)}
     {open && createPortal(<div className="mention-menu" style={menuStyle}>
       <div className="mention-menu-heading">{skillsOnly ? <Sparkles size={15} /> : <AtSign size={15} />}<strong>{skillsOnly ? "使用技能" : "引用"}</strong><span title={deviceName}>{deviceName}</span><button type="button" className="icon-button" title={skillsOnly ? "刷新技能列表" : "刷新引用列表"} aria-label={skillsOnly ? "刷新技能列表" : "刷新引用列表"} onMouseDown={event => event.preventDefault()} onClick={() => setRevision(previous => previous + 1)}><RefreshCw size={13} /></button></div>
       {!skillsOnly && <div className="mention-tabs" role="group" aria-label="引用类型">{tabs.map(item => <button type="button" key={item.id} aria-pressed={tab === item.id} className={tab === item.id ? "selected" : ""} onMouseDown={event => event.preventDefault()} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>}
@@ -188,14 +235,31 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
       {!!errors.length && <details className="mention-query-errors"><summary>部分候选暂不可用</summary>{errors.map((error, index) => <p key={index}>{error}</p>)}</details>}
       <div className="mention-menu-footer">↑↓ 选择 · Enter / Tab 插入 · Esc 关闭</div>
     </div>, document.body)}
-    <textarea ref={inputRef} aria-label={"向 " + deviceName + " 发送消息"} role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined} aria-activedescendant={open && options[activeIndex] ? menuId + "-" + activeIndex : undefined} placeholder={placeholder} value={draft.text} rows={2}
+    <textarea ref={inputRef} aria-label={"向 " + deviceName + " 发送消息"} role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={popupOpen} aria-controls={popupOpen ? menuId : undefined} aria-activedescendant={slashOpen && slashOptions[selectedSlashIndex] ? menuId + "-" + selectedSlashIndex : open && options[activeIndex] ? menuId + "-" + activeIndex : undefined} placeholder={placeholder} value={draft.text} rows={2}
       onChange={event => { onChange(editDraft(draft, event.target.value)); setCaret({ start: event.target.selectionStart, end: event.target.selectionEnd }); }}
       onSelect={event => setCaret({ start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd })}
-      onBlur={() => { if (trigger) setDismissed(trigger.key); }}
+      onFocus={() => setDismissed("")}
+      onBlur={() => { if (slash) setDismissed(slash.key); else if (trigger) setDismissed(trigger.key); }}
       onCompositionStart={() => setComposing(true)}
       onCompositionEnd={event => { setComposing(false); setCaret({ start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd }); }}
       onKeyDown={event => {
-        if (event.nativeEvent.isComposing || composing) return;
+        if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || composing) return;
+        if (event.key === "Tab" && event.shiftKey && enabled && onTogglePlan) {
+          event.preventDefault(); event.stopPropagation(); onTogglePlan(); return;
+        }
+        if (slashOpen) {
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setDismissed(slash!.key); return; }
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (slashOptions.length) setSlashIndex((selectedSlashIndex + (event.key === "ArrowDown" ? 1 : -1) + slashOptions.length) % slashOptions.length);
+            return;
+          }
+          if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
+            event.preventDefault(); event.stopPropagation();
+            if (slashOptions.length) chooseSlash(selectedSlashIndex); else if (event.key === "Enter") onSend();
+            return;
+          }
+        }
         if (open) {
           if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setDismissed(trigger!.key); return; }
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -213,6 +277,7 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
       }} />
     {!!validMentions(draft).length && <div className="mention-chips" aria-label="已选引用">{validMentions(draft).map(mention => <span className="mention-chip" key={mention.start + ":" + mention.path} title={mention.path}><TargetIcon kind={mention.kind} /><span>{mention.kind === "skill" ? "$" + mention.name : mention.label}</span><button type="button" aria-label={"移除引用 " + mention.label} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(removeMention(draft, mention)); focusAt(mention.start); }}><X size={12} /></button></span>)}</div>}
     <div className="mention-shortcuts">
+      {onCommand && <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 / 打开命令菜单" onMouseDown={event => event.preventDefault()} onClick={() => { const body = draft.text.startsWith("/") ? draft.text.replace(/^\/[^\s]*\s*/, "") : draft.text; onChange(editDraft(draft, "/" + (body ? " " + body : ""))); setDismissed(""); focusAt(1); }}><Slash size={13} />命令</button>}
       <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 @ 引用文件、目录或应用" onMouseDown={event => event.preventDefault()} onClick={() => startReference("@")}><AtSign size={13} />引用文件或应用</button>
       <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 $ 使用技能" onMouseDown={event => event.preventDefault()} onClick={() => startReference("$")}><Sparkles size={13} />$ 使用技能</button>
     </div>

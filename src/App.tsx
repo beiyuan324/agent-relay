@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, Archive, ArchiveRestore, ArrowUp, ChevronDown, ChevronRight, CircleHelp, FileCode2, Folder, Globe2, Laptop, Loader2, LockKeyhole, Monitor, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, Settings2, ShieldCheck, Square, Wifi, X } from "lucide-react";
-import { command, desktop, message, stateLabels, subscribe, title, when, type Device, type Json, type Snapshot } from "./api";
+import { call, command, desktop, message, stateLabels, subscribe, title, when, type Device, type Json, type Snapshot } from "./api";
 import { useWorkbench } from "./workbench";
 import { updateProgress, useUpdates } from "./updates";
 import { groupProjectThreads, type CodexProject, type ProjectGroup } from "./projects";
@@ -8,7 +8,9 @@ import { WindowTitlebar } from "./WindowTitlebar";
 import { MentionComposer } from "./MentionComposer";
 import { MessageQueue } from "./MessageQueue";
 import { ContextUsage } from "./ContextUsage";
-import { EMPTY_DRAFT, type ComposerDraft } from "./mentions";
+import { EMPTY_DRAFT, editDraft, insertMention, type ComposerDraft } from "./mentions";
+import { EFFORT_LABELS, SLASH_COMMANDS, expandPrompt, parseSlash, type SlashCommand } from "./slash-commands";
+import { CommandDialog, goalLabel, type CommandDialogState } from "./CommandDialog";
 import { referenceKind, type MessageReference } from "./message-text";
 import { Approval, Inspector, Transcript } from "./Transcript";
 import { copy, DeviceDialog, DiagnosticsDialog, Modal, NewThreadDialog, PairDialog, SettingsDialog } from "./Dialogs";
@@ -32,6 +34,9 @@ export default function App() {
   const updates = useUpdates();
   const [deviceId, setDeviceId] = useState("local");
   const [dialog, setDialog] = useState<Dialog>(null);
+  const [commandDialog, setCommandDialog] = useState<CommandDialogState | null>(null);
+  const [promptCatalog, setPromptCatalog] = useState<{ device: string; commands: SlashCommand[]; error?: string }>({ device: "", commands: [] });
+  const [modeCatalog, setModeCatalog] = useState<{ device: string; modes: Json[]; error?: string }>({ device: "", modes: [] });
   const [creatingProjectKey, setCreatingProjectKey] = useState<string | null>(null);
   const creatingThread = useRef(false);
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
@@ -56,7 +61,7 @@ export default function App() {
   const workspaceWidth = useElementWidth(workspace);
   const inspectorDrawer = inspector && workspaceWidth < 960;
   const details = snapshot?.devices.find(device => device.id === detailId);
-  const modalOpen = dialog !== null || !!details || reference !== null;
+  const modalOpen = dialog !== null || commandDialog !== null || !!details || reference !== null;
   const modifier = /mac|iphone|ipad/i.test(snapshot?.settings.identity.platform || navigator.platform) ? "⌘" : "Ctrl";
   const toggleSidebar = () => {
     if (narrow) {
@@ -193,11 +198,171 @@ export default function App() {
   const selectedModel = workbench.models.find((item: Json) => (item.model || item.id) === model);
   const efforts: Json[] = selectedModel?.supportedReasoningEfforts || [];
   const signedOut = workbench.environment?.account?.requiresOpenaiAuth && !workbench.environment?.account?.account;
-  const canCompose = available && workbench.ready && !workbench.opening && !workbench.thread?.relayArchived && !workbench.isArchiveBusy(workbench.selected || "") && workbench.environment?.installed !== false && !signedOut;
+  const canCompose = available && workbench.ready && !workbench.commandBusy && !workbench.opening && !workbench.thread?.relayArchived && !workbench.isArchiveBusy(workbench.selected || "") && workbench.environment?.installed !== false && !signedOut;
+  useEffect(() => {
+    if (!available) return;
+    let stopped = false;
+    setModeCatalog({ device: deviceId, modes: [] });
+    setPromptCatalog({ device: deviceId, commands: [] });
+    void call(deviceId, "relay/prompts").then(result => {
+      if (!Array.isArray(result.data)) throw new Error("自定义命令目录无效");
+      const seen = new Set<string>();
+      const commands = result.data.filter((prompt: Json) => typeof prompt.name === "string" && typeof prompt.content === "string").map((prompt: Json): SlashCommand => ({ id: "prompts:" + prompt.name.toLowerCase(), label: prompt.name, description: prompt.description || "自定义提示词", keywords: prompt.argumentHint, prompt: { content: prompt.content, argumentHint: prompt.argumentHint || "" } })).filter((command: SlashCommand) => { if (seen.has(command.id)) return false; seen.add(command.id); return true; });
+      if (!stopped) setPromptCatalog({ device: deviceId, commands, error: result.errors?.join("；") });
+    }).catch(error => { if (!stopped) setPromptCatalog({ device: deviceId, commands: [], error: message(error) }); });
+    void call(deviceId, "collaborationMode/list").then(result => {
+      if (!Array.isArray(result.data)) throw new Error("执行电脑未返回协作模式目录");
+      if (!stopped) setModeCatalog({ device: deviceId, modes: result.data });
+    }).catch(error => { if (!stopped) setModeCatalog({ device: deviceId, modes: [], error: message(error) }); });
+    return () => { stopped = true; };
+  }, [deviceId, available]);
+  const planPreset = modeCatalog.device === deviceId ? modeCatalog.modes.find(mode => mode.mode === "plan") : undefined;
+  const effectiveModel = model || workbench.permissions?.model || selectedModel?.model || (workbench.models.find(item => item.isDefault) || workbench.models[0])?.model || planPreset?.model || "";
+  const fastTier = (selectedModel?.serviceTiers || []).find((tier: Json) => tier.name?.toLowerCase() === "fast" || tier.id === "fast" || tier.id === "priority");
+  useEffect(() => {
+    if (!selectedModel || !workbench.serviceTier || workbench.serviceTier === "default") return;
+    if (!(selectedModel.serviceTiers || []).some((tier: Json) => tier.id === workbench.serviceTier)) workbench.setServiceTier("default");
+  }, [selectedModel, workbench.serviceTier]);
+  const persisted = !!workbench.selected && !workbench.thread?.relayHistoryPending && !workbench.thread?.relayDraft;
+  const occupied = !!workbench.activeTurn || workbench.sending || !!workbench.queue.length || workbench.thread?.status?.type === "active";
+  const commands = useMemo(() => [...SLASH_COMMANDS, ...(promptCatalog.device === deviceId ? promptCatalog.commands : [])].map(command => {
+    let disabledReason: string | undefined;
+    if (["compact", "fork", "review", "rename", "archive", "goal"].includes(command.id) && !persisted) disabledReason = "发送首条消息后可使用";
+    if (["compact", "fork", "review", "archive"].includes(command.id) && occupied) disabledReason = "请等待当前回合结束并处理待发消息";
+    if (["compact", "review", "fork", "archive"].includes(command.id) && workbench.requests.some(request => !request.params?.threadId || request.params.threadId === workbench.selected)) disabledReason = "请先处理当前会话的待办审批";
+    if (command.id === "plan" && !planPreset && workbench.mode !== "plan") disabledReason = modeCatalog.error ? "执行电脑不支持计划模式，请升级 Codex" : "正在读取可用的协作模式";
+    if (command.id === "fast" && !fastTier) disabledReason = "当前模型未提供 Fast 服务档位";
+    if (command.id === "reasoning" && !efforts.length) disabledReason = "当前模型未提供可选择的推理强度";
+    if (command.id === "model" && !workbench.models.length) disabledReason = "执行电脑未提供可用模型";
+    if (workbench.commandBusy) disabledReason = workbench.commandBusy;
+    return { ...command, disabledReason };
+  }), [deviceId, promptCatalog, persisted, occupied, planPreset, modeCatalog.error, fastTier, efforts.length, workbench.models.length, workbench.mode, workbench.requests, workbench.selected, workbench.commandBusy]);
+  const consumeDraft = (sent: ComposerDraft, draftKey: string, next = EMPTY_DRAFT) => setDrafts(previous => previous[draftKey] === sent ? { ...previous, [draftKey]: next } : previous);
+  const togglePlan = () => {
+    if (!planPreset && workbench.mode !== "plan") { setError("执行电脑未提供计划模式，请等待模式目录加载或升级 Codex。"); return; }
+    workbench.setMode(workbench.mode === "plan" ? "default" : "plan");
+    composer.current?.focus();
+  };
+  const executeSlash = async (command: SlashCommand, preserveDraft = false) => {
+    const selected = commands.find(item => item.id === command.id);
+    if (!selected) { setError("未知命令，输入 / 查看可用命令。"); return; }
+    if (selected.disabledReason) { setError(selected.disabledReason); return; }
+    const sent = draftState, draftKey = key, parsed = parseSlash(draft);
+    const preserved = !preserveDraft && draft.startsWith("/ ") ? editDraft(sent, draft.slice(2)) : undefined;
+    const argument = preserveDraft || preserved ? "" : parsed?.argument || "";
+    const scope = { device: deviceId, id: workbench.selected };
+    const consume = (next?: ComposerDraft) => { if (!preserveDraft) consumeDraft(sent, draftKey, next || preserved || EMPTY_DRAFT); };
+    try {
+      if (selected.prompt) {
+        try { consume(editDraft(sent, expandPrompt(selected.prompt.content, argument) + (preserved?.text ? "\n\n" + preserved.text : ""))); window.requestAnimationFrame(() => composer.current?.focus()); }
+        catch {
+          setCommandDialog({ kind: "prompt", device: deviceId, threadId: workbench.selected || "", argument, prompt: selected.prompt, initial: selected.id, suffix: preserved });
+          consume();
+        }
+        return;
+      }
+      if (command.id === "plan") {
+        const next = argument === "off" || argument === "default" ? "default" : argument ? "plan" : workbench.mode === "plan" ? "default" : "plan";
+        if (argument && !["on", "off", "default"].includes(argument)) {
+          if (!await workbench.send(editDraft(sent, argument), effectiveModel, effort, next, workbench.serviceTier)) return;
+        }
+        workbench.setMode(next); consume(); return;
+      }
+      if (command.id === "model" && argument) {
+        const chosen = workbench.models.find(item => (item.model || item.id) === argument);
+        if (!chosen) throw new Error("未找到此模型，请使用 /model 从列表选择。");
+        setModel(chosen.model || chosen.id); setEffort(chosen.defaultReasoningEffort || ""); consume(); return;
+      }
+      if (command.id === "reasoning" && argument) {
+        if (argument !== "default" && !efforts.some(item => item.reasoningEffort === argument)) throw new Error("当前模型不支持此推理强度。");
+        setEffort(argument === "default" ? "" : argument); consume(); return;
+      }
+      if (command.id === "fast") {
+        if (argument && !["on", "off"].includes(argument)) throw new Error("用法：/fast [on|off]");
+        workbench.setServiceTier(argument === "off" || (!argument && workbench.serviceTier === fastTier.id) ? "default" : fastTier.id); consume(); return;
+      }
+      if (command.id === "skills" || command.id === "apps") { consume(editDraft(sent, (command.id === "skills" ? "$" : "@") + argument + (preserved?.text ? " " + preserved.text : ""))); window.requestAnimationFrame(() => { composer.current?.focus(); composer.current?.setSelectionRange(1 + argument.length, 1 + argument.length); }); return; }
+      if (command.id === "init") {
+        if (await workbench.send(editDraft(sent, "请检查当前项目，并为项目创建或完善 AGENTS.md，记录项目结构、开发约定、常用命令和注意事项。" + (argument ? "\n补充要求：" + argument : "")), effectiveModel, effort, planPreset || workbench.thread?.relayMode ? workbench.mode : undefined, workbench.serviceTier)) consume();
+        return;
+      }
+      if (command.id === "compact") { if (argument) throw new Error("/compact 不接受额外参数"); await workbench.runCommand("thread/compact/start", {}, scope); consume(); return; }
+      if (command.id === "fork") { if (argument) throw new Error("/fork 不接受额外参数"); await workbench.runCommand("thread/fork", {}, scope); consume(); return; }
+      if (command.id === "new") {
+        if (argument) throw new Error("/new 不接受额外参数");
+        if (!workbench.thread?.cwd) { beginNewThread(); consume(); return; }
+        await workbench.create(workbench.thread.cwd, model, deviceId, workbench.thread.projectId); consume(); return;
+      }
+      if (command.id === "project") { beginNewThread(); consume(); return; }
+      if (command.id === "archive") { if (argument) throw new Error("/archive 不接受额外参数"); if (workbench.thread && await workbench.changeArchive(workbench.thread, true)) consume(); return; }
+      if (command.id === "settings") { setDialog("settings"); consume(); return; }
+      if (command.id === "feedback") { setDialog("diagnostics"); consume(); return; }
+      if (command.id === "rename" && argument) { await workbench.runCommand("thread/name/set", { name: argument }, scope); consume(); return; }
+      const kind = (command.id === "usage" ? "status" : command.id) as CommandDialogState["kind"];
+      const state: CommandDialogState = { kind, device: deviceId, threadId: workbench.selected || "", argument, initial: kind === "rename" ? title(workbench.thread || {}) : undefined };
+      if (kind === "status") {
+        state.info = { deviceName, "会话 ID": workbench.selected, "执行电脑": deviceName, "项目路径": workbench.thread?.cwd || "未指定", "模型": effectiveModel || "主机默认", "推理强度": EFFORT_LABELS[effort] || effort || "默认", "协作模式": workbench.mode === "plan" ? "计划模式" : "默认模式", "上下文用量": workbench.thread?.tokenUsage?.last?.totalTokens ?? workbench.thread?.tokenUsage?.total?.totalTokens ?? "未提供", "上下文窗口": workbench.thread?.tokenUsage?.modelContextWindow ?? "未提供" };
+        state.load = () => call(scope.device, "account/rateLimits/read");
+      }
+      if (kind === "mcp") state.load = async () => {
+        const data: Json[] = [], seen = new Set<string>(); let cursor: string | null = null;
+        do {
+          const page: Json = await call(scope.device, "mcpServerStatus/list", { limit: 100, cursor, ...(persisted ? { threadId: scope.id } : {}) });
+          if (!Array.isArray(page.data)) throw new Error("执行电脑返回的 MCP 列表无效");
+          data.push(...page.data); cursor = page.nextCursor || null;
+          if (cursor && seen.has(cursor)) throw new Error("MCP 分页未能继续"); if (cursor) seen.add(cursor);
+        } while (cursor && data.length < 1000);
+        return { data };
+      };
+      if (kind === "goal") state.load = () => call(scope.device, "thread/goal/get", { threadId: scope.id });
+      setCommandDialog(state); consume();
+    } catch (error) { setError(message(error)); }
+  };
   const send = async () => {
     if (!canCompose || !draft.trim()) return;
+    if (draft.trim() === "/") { composer.current?.focus(); composer.current?.setSelectionRange(1, 1); return; }
+    const slash = parseSlash(draft);
+    if (slash) {
+      const command = commands.find(command => command.id === slash.id);
+      if (command) await executeSlash(command);
+      else {
+        try {
+          const catalog = await call(deviceId, "skills/list", { cwds: workbench.thread?.cwd ? [workbench.thread.cwd] : undefined });
+          const skill = (catalog.data || []).flatMap((entry: Json) => entry.skills || []).find((skill: Json) => skill.enabled !== false && typeof skill.name === "string" && skill.name.toLowerCase() === slash.id);
+          if (!skill) throw new Error("未知命令 /" + slash.id + "，输入 / 查看可用命令。");
+          const next = insertMention(draftState, 0, draft.indexOf("/") + slash.id.length + 1, { kind: "skill", name: skill.name, label: skill.interface?.displayName || skill.name, path: skill.path, detail: skill.description || "" });
+          consumeDraft(draftState, key, next.draft);
+          window.requestAnimationFrame(() => { composer.current?.focus(); composer.current?.setSelectionRange(next.caret, next.caret); });
+        } catch (error) { setError(message(error)); }
+      }
+      return;
+    }
     const sent = draftState, draftKey = key;
-    if (await workbench.send(sent, model, effort)) setDrafts(previous => previous[draftKey] === sent ? { ...previous, [draftKey]: EMPTY_DRAFT } : previous);
+    if (await workbench.send(sent, effectiveModel, effort, workbench.thread?.relayMode, workbench.serviceTier)) consumeDraft(sent, draftKey);
+  };
+  const implementPlan = async (plan: string) => {
+    if (!canCompose || !planPreset) return;
+    const accepted = await workbench.send({ text: "请按以下计划开始实施：\n\n" + plan, mentions: [] }, effectiveModel, effort, "default", workbench.serviceTier);
+    if (accepted) workbench.setMode("default");
+  };
+  const implementPlanRef = useRef(implementPlan); implementPlanRef.current = implementPlan;
+  const onImplementPlan = useCallback((plan: string) => { void implementPlanRef.current(plan); }, []);
+  const applyCommand = async (value: Json) => {
+    if (!commandDialog) return;
+    if (commandDialog.device !== deviceId || commandDialog.threadId !== workbench.selected) throw new Error("会话或设备已变化，请重新打开命令");
+    const scope = { device: commandDialog.device, id: commandDialog.threadId };
+    if (commandDialog.kind === "prompt") {
+      if (draftState.text.trim() && draftState !== commandDialog.suffix) throw new Error("输入框中已有新草稿，请先关闭命令并处理草稿");
+      const text = expandPrompt(commandDialog.prompt!.content, value.value);
+      const next = commandDialog.suffix ? editDraft(commandDialog.suffix, text + "\n\n" + commandDialog.suffix.text) : { text, mentions: [] };
+      setDrafts(previous => ({ ...previous, [key]: next }));
+      window.requestAnimationFrame(() => composer.current?.focus());
+    }
+    else if (commandDialog.kind === "model") { const chosen = workbench.models.find(item => (item.model || item.id) === value.value); if (!chosen) throw new Error("此模型已不可用"); setModel(value.value); setEffort(chosen.defaultReasoningEffort || ""); }
+    else if (commandDialog.kind === "reasoning") setEffort(value.value);
+    else if (commandDialog.kind === "rename") await workbench.runCommand("thread/name/set", { name: value.value }, scope);
+    else if (commandDialog.kind === "review") await workbench.runCommand("review/start", value, scope);
+    else if (commandDialog.kind === "goal") await workbench.runCommand(value.action === "clear" ? "thread/goal/clear" : "thread/goal/set", value.action === "clear" ? {} : value.action === "status" ? { status: value.status } : value, scope);
   };
   const queueing = !!workbench.activeTurn || workbench.sending || workbench.queue.length > 0;
   const editQueued = (id: string) => {
@@ -206,16 +371,25 @@ export default function App() {
     if (!item) return;
     setDrafts(previous => ({ ...previous, [key]: item.draft }));
     setModel(item.model); setEffort(item.effort);
+    if (item.collaborationMode || planPreset) workbench.setMode(item.collaborationMode || "default");
+    if (item.serviceTier || workbench.serviceTier) workbench.setServiceTier(item.serviceTier || "default");
     window.requestAnimationFrame(() => { composer.current?.focus(); composer.current?.setSelectionRange(item.draft.text.length, item.draft.text.length); });
   };
   useEffect(() => {
     if (composer.current) { composer.current.style.height = "auto"; composer.current.style.height = `${Math.min(composer.current.scrollHeight, 180)}px`; }
   }, [draft, workbench.selected]);
-  const shortcuts = useRef({ available, modalOpen, sidebarOverlay, inspectorDrawer });
-  shortcuts.current = { available, modalOpen, sidebarOverlay, inspectorDrawer };
+  const openCommands = () => {
+    if (!canCompose) return;
+    const body = draft.startsWith("/") ? draft.replace(/^\/[^\s]*\s*/, "") : draft;
+    setDrafts(previous => ({ ...previous, [key]: editDraft(draftState, "/" + (body ? " " + body : "")) }));
+    window.requestAnimationFrame(() => { composer.current?.focus(); composer.current?.setSelectionRange(1, 1); });
+  };
+  const shortcuts = useRef({ available, modalOpen, sidebarOverlay, inspectorDrawer, canCompose, openCommands });
+  shortcuts.current = { available, modalOpen, sidebarOverlay, inspectorDrawer, canCompose, openCommands };
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || shortcuts.current.modalOpen || shortcuts.current.sidebarOverlay || shortcuts.current.inspectorDrawer) return;
+      if (event.key === "/" && !event.ctrlKey && !event.metaKey && !event.altKey && shortcuts.current.canCompose && !(event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable]:not([contenteditable=false])"))) { event.preventDefault(); shortcuts.current.openCommands(); return; }
       if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
         if (event.key.toLowerCase() === "k") { event.preventDefault(); searchInput.current?.focus(); }
         if (event.key.toLowerCase() === "n") { event.preventDefault(); if (shortcuts.current.available) beginNewThread(); }
@@ -349,9 +523,9 @@ export default function App() {
             {workbench.thread.relayArchived && <div className="session-banner archived-banner" role="status"><Archive size={16} /><div><strong>此会话已归档</strong><p>恢复后可继续发送消息。</p></div><button className="secondary small" disabled={!available || workbench.opening || workbench.isArchiveBusy(workbench.thread.id)} onClick={() => { setError(""); void workbench.changeArchive(workbench.thread!, false); }}><ArchiveRestore size={14} />{workbench.isArchiveBusy(workbench.thread.id) ? "正在恢复…" : "恢复会话"}</button></div>}
             {workbench.historyError && <div className="session-banner history-warning" role="status"><AlertCircle size={15} /><div><p>{workbench.historyError}</p></div></div>}
             </div>
-            <Transcript thread={workbench.thread} running={available && workbench.ready && !!workbench.activeTurn} older={() => void workbench.older()} hasOlder={!!workbench.olderCursor} loading={workbench.opening} offline={!available} onReference={openReference} />
+            <Transcript thread={workbench.thread} running={available && workbench.ready && !!workbench.activeTurn} older={() => void workbench.older()} hasOlder={!!workbench.olderCursor} loading={workbench.opening} offline={!available} onReference={openReference} onImplementPlan={canCompose && planPreset ? onImplementPlan : undefined} />
             {workbench.ready && !workbench.opening && !!approvalForThread.length && <div className="approvals-container">{approvalForThread.map(request => <Approval request={request} key={request.id} deviceName={deviceName} resolve={workbench.resolve} />)}</div>}
-            {!workbench.thread.relayArchived && <div className="composer-container"><MessageQueue items={workbench.queue} paused={workbench.queuePaused} available={canCompose} canEdit={!draft.length} onEdit={editQueued} onRemove={id => { workbench.removeQueued(id); }} onResume={workbench.resumeQueue} /><div className={`composer ${!canCompose ? "disabled" : ""}`}><MentionComposer key={key} device={deviceId} threadId={workbench.thread.relayDraft ? "" : workbench.selected || ""} cwd={workbench.thread.cwd || ""} deviceName={deviceName} enabled={canCompose && !modalOpen && !sidebarOverlay && !inspectorDrawer} draft={draftState} onChange={value => setDrafts(previous => ({ ...previous, [key]: value }))} inputRef={composer} onSend={() => void send()} placeholder={canCompose ? queueing ? "继续输入，Enter 加入队列，当前回合结束后发送" : "输入消息，@ 引用文件或应用，$ 使用技能" : !available ? "连接已断开，可继续编辑草稿，恢复后再发送" : workbench.opening ? "正在同步会话，可继续编辑草稿" : workbench.resumeError ? "当前仅查看历史，接续成功后可发送消息" : "连接恢复后可继续输入和发送"} /><div className="composer-bottom"><div className="composer-selectors"><select aria-label="选择模型" title={selectedModel?.displayName || model || "主机默认模型"} value={model} disabled={!canCompose} onChange={event => { const chosen = workbench.models.find((m: Json) => (m.model || m.id) === event.target.value); setModel(event.target.value); setEffort(chosen?.defaultReasoningEffort || ""); }}><option value="">主机默认模型</option>{workbench.models.map((m: Json) => <option key={m.id || m.model} value={m.model || m.id}>{m.displayName || m.model || m.id}</option>)}</select>{!!efforts.length && <select aria-label="推理强度" value={effort} disabled={!canCompose} onChange={event => setEffort(event.target.value)}><option value="">默认强度</option>{efforts.map((e: Json) => <option key={e.reasoningEffort} value={e.reasoningEffort}>{({ minimal: "最小", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大", ultra: "最高" } as Record<string, string>)[e.reasoningEffort] || e.reasoningEffort}</option>)}</select>}</div><div className="composer-actions"><ContextUsage usage={workbench.thread.tokenUsage} />{workbench.activeTurn && <button className="stop-button" aria-label="停止当前回合" onClick={() => void workbench.stop()} disabled={!available || !workbench.ready || workbench.opening}><Square size={12} fill="currentColor" />停止</button>}<button className="send-button" aria-label={queueing ? "加入消息队列" : "发送消息"} title={queueing ? "加入队列，当前回合结束后发送" : "发送消息"} disabled={!canCompose || !draft.trim()} onClick={() => void send()}><ArrowUp size={19} /></button></div></div></div><div className="composer-footnote"><span><Monitor size={11} />任务将在 {deviceName} 执行</span><span>{queueing ? "Enter 加入队列" : "Enter 发送"} · Shift + Enter 换行</span></div></div>}</> : workbench.selected && workbench.opening ? <div className="center-state"><Loader2 className="spin" size={26} /><p>正在读取会话…</p></div> : <div className="welcome">
+            {!workbench.thread.relayArchived && <div className="composer-container">{workbench.commandBusy && <div className="composer-command-status" role="status"><Loader2 size={14} className="spin" />{workbench.commandBusy}</div>}{workbench.thread.goal && <div className="composer-goal"><span><strong>目标 · {goalLabel(workbench.thread.goal.status)}</strong><small>{workbench.thread.goal.objective}</small></span><button className="secondary small" disabled={!canCompose} onClick={() => { void executeSlash(commands.find(command => command.id === "goal")!, true); }}>管理目标</button></div>}<MessageQueue items={workbench.queue} paused={workbench.queuePaused} available={canCompose} canEdit={!draft.length} onEdit={editQueued} onRemove={id => { workbench.removeQueued(id); }} onResume={workbench.resumeQueue} /><div className={`composer ${!canCompose ? "disabled" : ""}`}><MentionComposer key={key} device={deviceId} threadId={workbench.thread.relayDraft ? "" : workbench.selected || ""} cwd={workbench.thread.cwd || ""} deviceName={deviceName} enabled={canCompose && !modalOpen && !sidebarOverlay && !inspectorDrawer} draft={draftState} onChange={value => setDrafts(previous => ({ ...previous, [key]: value }))} inputRef={composer} commands={commands} commandError={promptCatalog.device === deviceId ? promptCatalog.error : undefined} onCommand={command => { void executeSlash(command); }} onTogglePlan={togglePlan} onSend={() => void send()} placeholder={canCompose ? queueing ? "继续输入，Enter 加入队列，当前回合结束后发送" : workbench.mode === "plan" ? "描述目标或问题，先与 Codex 制定计划" : "输入消息，/ 使用命令，@ 引用文件或应用，$ 使用技能" : workbench.commandBusy ? workbench.commandBusy : !available ? "连接已断开，可继续编辑草稿，恢复后再发送" : workbench.opening ? "正在同步会话，可继续编辑草稿" : workbench.resumeError ? "当前仅查看历史，接续成功后可发送消息" : "连接恢复后可继续输入和发送"} /><div className="composer-bottom"><div className="composer-selectors"><button type="button" className={`composer-mode ${workbench.mode === "plan" ? "is-plan" : ""}`} aria-pressed={workbench.mode === "plan"} disabled={!canCompose || (!planPreset && workbench.mode !== "plan")} title="Shift + Tab 切换计划模式" onClick={togglePlan}>{workbench.mode === "plan" ? "计划模式" : "默认模式"}</button>{workbench.serviceTier && workbench.serviceTier !== "default" && <span className="composer-tier">Fast</span>}<select aria-label="选择模型" title={selectedModel?.displayName || model || "主机默认模型"} value={model} disabled={!canCompose} onChange={event => { const chosen = workbench.models.find((m: Json) => (m.model || m.id) === event.target.value); setModel(event.target.value); setEffort(chosen?.defaultReasoningEffort || ""); }}><option value="">主机默认模型</option>{workbench.models.map((m: Json) => <option key={m.id || m.model} value={m.model || m.id}>{m.displayName || m.model || m.id}</option>)}</select>{!!efforts.length && <select aria-label="推理强度" value={effort} disabled={!canCompose} onChange={event => setEffort(event.target.value)}><option value="">默认强度</option>{efforts.map((e: Json) => <option key={e.reasoningEffort} value={e.reasoningEffort}>{EFFORT_LABELS[e.reasoningEffort] || e.reasoningEffort}</option>)}</select>}</div><div className="composer-actions"><ContextUsage usage={workbench.thread.tokenUsage} />{workbench.activeTurn && <button className="stop-button" aria-label="停止当前回合" onClick={() => void workbench.stop()} disabled={!available || !workbench.ready || workbench.opening}><Square size={12} fill="currentColor" />停止</button>}<button className="send-button" aria-label={queueing ? "加入消息队列" : "发送消息"} title={queueing ? "加入队列，当前回合结束后发送" : "发送消息"} disabled={!canCompose || !draft.trim()} onClick={() => void send()}><ArrowUp size={19} /></button></div></div></div><div className="composer-footnote" title={promptCatalog.device === deviceId ? promptCatalog.error : undefined}><span><Monitor size={11} />任务将在 {deviceName} 执行</span><span>{queueing ? "Enter 加入队列" : "Enter 发送"} · Shift + Enter 换行</span></div></div>}</> : workbench.selected && workbench.opening ? <div className="center-state"><Loader2 className="spin" size={26} /><p>正在读取会话…</p></div> : <div className="welcome">
               <h2>未选择会话</h2>
               <p className="welcome-description">从左侧打开已有会话，或新建会话。</p>
               <div className="welcome-actions">
@@ -368,6 +542,7 @@ export default function App() {
         {inspector && <div className={`inspector-panel ${inspectorDrawer ? "is-drawer" : ""}`} ref={inspectorPanel} role={inspectorDrawer ? "dialog" : undefined} aria-modal={inspectorDrawer || undefined} aria-label={inspectorDrawer ? "文件变更检查器" : undefined} tabIndex={inspectorDrawer ? -1 : undefined}><Inspector thread={workbench.thread} close={() => setInspector(false)} /></div>}
       </div>
     </main>
+    {commandDialog && <CommandDialog key={JSON.stringify([commandDialog.device, commandDialog.threadId, commandDialog.kind])} state={commandDialog} commands={commands} models={workbench.models} model={model} effort={effort} close={() => setCommandDialog(null)} apply={applyCommand} />}
     {dialog === "pair" && <PairDialog snapshot={snapshot} close={() => setDialog(null)} changed={refresh} />}
     {dialog === "settings" && <SettingsDialog snapshot={snapshot} updates={updates} close={() => setDialog(null)} changed={async () => { await refresh(); workbench.refresh(); }} />}
     {dialog === "diagnostics" && <DiagnosticsDialog snapshot={snapshot} close={() => setDialog(null)} />}

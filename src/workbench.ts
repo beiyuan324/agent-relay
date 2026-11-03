@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call, message, type Json, type RelayEvent } from "./api";
 import { referenceInput, type ComposerDraft } from "./mentions";
+import type { CollaborationMode } from "./slash-commands";
 import { EMPTY_PROJECT_CATALOG, projectCatalog, type ProjectCatalog } from "./projects";
 import { applyEvent, mergeLive, mergeApprovals, pruneCache, retainedBytes, type ApprovalUpdate } from "./workbench-state";
 export { applyEvent } from "./workbench-state";
@@ -10,6 +11,8 @@ export interface QueuedMessage {
   draft: ComposerDraft;
   model: string;
   effort: string;
+  collaborationMode?: CollaborationMode;
+  serviceTier?: string;
   status: "queued" | "sending" | "failed";
   error?: string;
 }
@@ -39,6 +42,16 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const [models, setModels] = useState<Json[]>([]);
   const [environment, setEnvironment] = useState<Json | null>(null);
   const [permissions, setPermissions] = useState<Json | null>(null);
+  const [commandState, setCommandState] = useState<Record<string, string>>({});
+  const commandLocks = useRef<Record<string, string>>({});
+  const commandTokens = useRef<Record<string, string>>({});
+  const goalVersions = useRef<Record<string, number>>({});
+  const updateCommand = useCallback((key: string, label?: string) => {
+    if (!label && !commandLocks.current[key]) return;
+    if (label) commandLocks.current[key] = label;
+    else { delete commandLocks.current[key]; delete commandTokens.current[key]; }
+    setCommandState({ ...commandLocks.current });
+  }, []);
   const [requests, setRequests] = useState<Record<string, Json[]>>({});
   const [search, setSearch] = useState("");
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -370,6 +383,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       }
       if (!current()) return;
       const latest = (thread.turns || []).at(-1);
+      if (thread.status?.type !== "active" && !(thread.turns || []).some((turn: Json) => turn.status === "inProgress")) updateCommand(key);
       if (historyError) pauseQueue(key, "会话历史未同步完整，请重新读取后继续队列");
       else if (latest && ["failed", "interrupted"].includes(latest.status)) pauseQueue(key, "上个回合未正常完成，队列已暂停");
       flushEvents();
@@ -380,7 +394,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       const retainedPrefix = preserveHistory && !historyError ? retainedTurns.slice(0, overlap < 0 ? retainedTurns.length : overlap) : [];
       setCache(previous => {
         const history = { ...previous[key], ...thread, turns: historyError ? previous[key]?.turns || thread.turns || [] : [...retainedPrefix, ...(thread.turns || [])] };
-        return { ...previous, [key]: { ...mergeLive(history, previous[key], touched), interrupted: false, relayArchived: archived } };
+        return { ...previous, [key]: { ...mergeLive(history, previous[key], touched), relayMode: previous[key]?.relayMode ?? result?.collaborationMode?.mode, relayServiceTier: previous[key]?.relayServiceTier ?? result?.serviceTier ?? undefined, interrupted: false, relayArchived: archived } };
       });
       if (result && !archived) {
         resumed.current.add(key);
@@ -394,7 +408,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         setSessions(previous => ({ ...previous, [key]: { ready: false, ...(archived ? { historyError: message(error) } : { resumeError: message(error) }) } }));
       }
     } finally { if (epoch === openEpoch.current) setOpening(false); }
-  }, [flushEvents, pauseQueue, setCache]);
+  }, [flushEvents, pauseQueue, setCache, updateCommand]);
 
   const toggleArchive = useCallback(() => {
     const expanded = !active.current.archiveExpanded;
@@ -444,6 +458,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       flushEvents();
       delete approvalUpdates.current[target];
       processEpoch.current[target] = (processEpoch.current[target] || 0) + 1;
+      for (const key of Object.keys(commandLocks.current)) if (JSON.parse(key)[0] === target) updateCommand(key);
       for (const key of Object.keys(queued.current)) {
         if (JSON.parse(key)[0] === target) pauseQueue(key, "Codex 已退出，重新接续会话后可继续队列");
       }
@@ -488,6 +503,12 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     const id = p.threadId || p.thread?.id;
     if (!id) return;
     const key = keyOf(target, id);
+    if (value.method === "turn/completed" || value.method === "thread/closed") updateCommand(key);
+    if (value.method === "thread/goal/updated" || value.method === "thread/goal/cleared") goalVersions.current[key] = (goalVersions.current[key] || 0) + 1;
+    if (value.method === "thread/name/updated" && target === active.current.device) {
+      setThreads(previous => previous.map(thread => thread.id === id ? { ...thread, name: p.threadName ?? p.name } : thread));
+      setArchivedThreads(previous => previous.map(thread => thread.id === id ? { ...thread, name: p.threadName ?? p.name } : thread));
+    }
     if (value.method === "thread/archived" || value.method === "thread/unarchived") {
       applyArchiveState(target, id, value.method === "thread/archived");
       return;
@@ -530,7 +551,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
         timer: window.setTimeout(flushEvents, 100),
       };
     }
-  }, [applyArchiveState, flushEvents, materializeThread, pauseQueue, recordApproval, setCache]);
+  }, [applyArchiveState, flushEvents, materializeThread, pauseQueue, recordApproval, setCache, updateCommand]);
 
   const archiveReason = (thread: Json): string => {
     const key = keyOf(device, thread.id);
@@ -539,6 +560,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     if (archiveBusy[key]) return "正在更新归档状态";
     if (newThreads.current[key]?.relayHistoryPending === true) return "发送首条消息后可归档";
     if (selected === thread.id && opening) return "正在读取会话";
+    if (commandLocks.current[key]) return commandLocks.current[key];
     if (inFlight.current?.key === key) return "正在发送消息";
     if (queued.current[key]?.items.length) return "请先处理此会话的待发消息";
     if (current.status?.type === "active" || (current.turns || []).some((turn: Json) => turn.status === "inProgress")) return "请等待当前任务结束后归档";
@@ -590,7 +612,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const submit = useCallback(async (target: string, selectedId: string, item: QueuedMessage) => {
     if (sendingRef.current || queued.current[keyOf(target, selectedId)]?.items[0]?.id !== item.id || queued.current[keyOf(target, selectedId)]?.items[0]?.status !== "queued") return;
     let id = selectedId;
-    const { draft, model, effort } = item;
+    const { draft, model, effort, collaborationMode, serviceTier } = item;
     const flight = { key: keyOf(target, id) };
     inFlight.current = flight;
     sendingRef.current = true; setSending(true);
@@ -640,6 +662,8 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       const result = await call(target, "turn/start", {
         threadId: id, input: referenceInput(draft),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+        ...(collaborationMode ? { collaborationMode: { mode: collaborationMode, settings: { model, reasoning_effort: effort || null, developer_instructions: null } } } : {}),
+        ...(serviceTier ? { serviceTier } : {}),
       });
       if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，请重新读取会话确认提交状态");
       const key = keyOf(target, id);
@@ -679,11 +703,13 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     }
   }, [materializeThread, pauseQueue, setCache, updateQueues]);
 
-  const send = async (draft: ComposerDraft, model: string, effort: string): Promise<boolean> => {
+  const send = async (draft: ComposerDraft, model: string, effort: string, collaborationMode?: CollaborationMode, serviceTier?: string): Promise<boolean> => {
     const { device: target, selected: id, available } = active.current;
     if (!id || !available || !resumed.current.has(keyOf(target, id)) || archiveFlags.current[keyOf(target, id)] === true || archiveMutations.current.has(keyOf(target, id)) || !draft.text.trim()) return false;
     const key = keyOf(target, id);
-    const item: QueuedMessage = { id: crypto.randomUUID(), draft: { text: draft.text, mentions: draft.mentions.map(mention => ({ ...mention })) }, model, effort, status: "queued" };
+    if (commandLocks.current[key]) { onErrorRef.current(commandLocks.current[key]); return false; }
+    if (collaborationMode && !model) { onErrorRef.current("请选择模型后再使用协作模式"); return false; }
+    const item: QueuedMessage = { id: crypto.randomUUID(), draft: { text: draft.text, mentions: draft.mentions.map(mention => ({ ...mention })) }, model, effort, collaborationMode, serviceTier, status: "queued" };
     updateQueues(previous => ({ ...previous, [key]: { ...previous[key], items: [...(previous[key]?.items || []), item] } }));
     return true;
   };
@@ -693,6 +719,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     for (const [key, queue] of Object.entries(queues)) {
       const [target, id] = JSON.parse(key) as [string, string];
       const item = queue.items[0], thread = cache[key];
+      if (commandLocks.current[key]) continue;
       if (!item || item.status !== "queued" || queue.paused || !connected.current.has(target) || !resumed.current.has(key) || !thread || thread.relayArchived || archiveFlags.current[key] || archiveMutations.current.has(key)) continue;
       const live = liveTurns.current[key];
       if (live?.status === "inProgress" || (!live && thread.status?.type === "active") || (thread.turns || []).some((turn: Json) => turn.status === "inProgress" && !(live && live.id === turn.id && live.status !== "inProgress"))) continue;
@@ -701,7 +728,67 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       void submit(target, id, item);
       break;
     }
-  }, [queues, cache, sessions, requests, device, available, availableDevices, sending, submit]);
+  }, [queues, cache, sessions, requests, device, available, availableDevices, sending, submit, commandState]);
+
+  const runCommand = async (method: string, params: Json = {}, expected = { device, id: selected }): Promise<Json> => {
+    const current = active.current, target = expected.device, id = expected.id;
+    if (!id || current.device !== target || current.selected !== id || !current.available || !resumed.current.has(keyOf(target, id))) throw new Error("会话或设备已变化，请重新打开命令");
+    const key = keyOf(target, id), thread = cached.current[key];
+    if (!thread || thread.relayDraft || thread.relayArchived) throw new Error("发送首条消息并接续会话后可执行此命令");
+    if (commandLocks.current[key]) throw new Error(commandLocks.current[key]);
+    const startsWork = method === "thread/compact/start" || method === "review/start";
+    if ((startsWork || method === "thread/fork") && (queued.current[key]?.items.length || inFlight.current?.key === key || liveTurns.current[key]?.status === "inProgress" || thread.status?.type === "active" || (thread.turns || []).some((turn: Json) => turn.status === "inProgress"))) throw new Error("请等待当前回合结束并处理待发消息后执行此命令");
+    if (startsWork && (requests[target] || []).some(request => !request.params?.threadId || request.params.threadId === id)) throw new Error("请先处理当前会话的待办审批");
+    const label = method === "thread/compact/start" ? "正在压缩上下文…" : method === "review/start" ? "正在审查代码…" : "正在执行命令…";
+    const operation = crypto.randomUUID();
+    commandTokens.current[key] = operation;
+    updateCommand(key, label);
+    const goalVersion = goalVersions.current[key] || 0;
+    const generation = processEpoch.current[target] || 0;
+    const startedSequence = sequence.current;
+    try {
+      const result = await call(target, method, { ...params, threadId: id });
+      if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，请重新读取会话确认命令结果");
+      if (method === "thread/fork" && result.thread?.id) {
+        setCache(previous => ({ ...previous, [keyOf(target, result.thread.id)]: { ...result.thread, relayMode: thread.relayMode, relayServiceTier: thread.relayServiceTier } }));
+        if (active.current.device === target) {
+          setThreads(previous => [result.thread, ...previous.filter(thread => thread.id !== result.thread.id)]);
+          if (active.current.selected === id) await open(result.thread.id);
+        }
+      }
+      if (method === "thread/name/set") {
+        setCache(previous => ({ ...previous, [key]: { ...previous[key], name: params.name } }));
+        if (active.current.device === target) setThreads(previous => previous.map(thread => thread.id === id ? { ...thread, name: params.name } : thread));
+      }
+      if ((method === "thread/goal/set" || method === "thread/goal/clear") && goalVersion === (goalVersions.current[key] || 0)) setCache(previous => ({ ...previous, [key]: { ...previous[key], goal: result.goal || null } }));
+      if (startsWork && result.turn?.id && (!liveTurns.current[key] || liveTurns.current[key].sequence <= startedSequence)) {
+        liveTurns.current[key] = { id: result.turn.id, status: result.turn.status || "inProgress", sequence: startedSequence };
+        setCache(previous => {
+          const thread = previous[key]; if (!thread || (thread.turns || []).some((turn: Json) => turn.id === result.turn.id)) return previous;
+          return { ...previous, [key]: { ...thread, turns: [...(thread.turns || []), result.turn] } };
+        });
+      }
+      return result;
+    } catch (error) {
+      if (commandTokens.current[key] === operation) updateCommand(key);
+      if (startsWork) pauseQueue(key, "命令结果尚未确认，请重新读取会话后继续队列");
+      throw new Error(message(error) + "；若执行电脑的 Codex 版本不支持此命令，请先升级。");
+    } finally {
+      if (!startsWork && commandTokens.current[key] === operation) updateCommand(key);
+    }
+  };
+  const setMode = (mode: CollaborationMode) => {
+    const current = active.current;
+    if (!current.selected) return;
+    const key = keyOf(current.device, current.selected);
+    setCache(previous => ({ ...previous, [key]: { ...previous[key], relayMode: mode } }));
+  };
+  const setServiceTier = (tier: string) => {
+    const current = active.current;
+    if (!current.selected) return;
+    const key = keyOf(current.device, current.selected);
+    setCache(previous => ({ ...previous, [key]: { ...previous[key], relayServiceTier: tier } }));
+  };
 
   const removeQueued = (id: string): QueuedMessage | undefined => {
     const current = active.current;
@@ -722,6 +809,15 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const thread = selected ? cache[keyOf(device, selected)] : undefined;
   const session = selected ? sessions[keyOf(device, selected)] : undefined;
   const ready = available && !!session?.ready;
+  useEffect(() => {
+    if (!ready || !selected || thread?.relayDraft || thread?.relayHistoryPending) return;
+    let stopped = false;
+    const key = keyOf(device, selected), version = goalVersions.current[key] || 0;
+    void call(device, "thread/goal/get", { threadId: selected }).then(result => {
+      if (!stopped && version === (goalVersions.current[key] || 0)) setCache(previous => !previous[key] ? previous : ({ ...previous, [key]: { ...previous[key], goal: result.goal || null } }));
+    }).catch(() => { /* Older Codex hosts do not expose goal mode. */ });
+    return () => { stopped = true; };
+  }, [device, selected, ready, thread?.relayDraft, thread?.relayHistoryPending, setCache]);
   const activeTurn = [...(thread?.turns || [])].reverse().find((turn: Json) => turn.status === "inProgress");
   const stop = async () => {
     if (!selected || !available || !resumed.current.has(keyOf(device, selected)) || !activeTurn?.id) return;
@@ -769,7 +865,10 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     search, setSearch, nextCursor, loading, opening, sending: selected ? !!queues[keyOf(device, selected)]?.items.some(item => item.status === "sending") : false, activeTurn, olderCursor,
     queue: selected ? queues[keyOf(device, selected)]?.items || [] : [],
     queuePaused: selected ? queues[keyOf(device, selected)]?.paused : undefined,
-    removeQueued, resumeQueue,
+    removeQueued, resumeQueue, runCommand, setMode, setServiceTier,
+    mode: (thread?.relayMode || "default") as CollaborationMode,
+    serviceTier: thread?.relayServiceTier as string | undefined,
+    commandBusy: selected ? commandState[keyOf(device, selected)] : undefined,
     ready, resumeError: session?.resumeError, historyError: session?.historyError,
     open, event, create, send, stop, resolve, older,
     refresh: () => { refreshTargets.current.add(active.current.device); setEnvironmentRevision(previous => previous + 1); },

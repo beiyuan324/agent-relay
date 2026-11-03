@@ -46,6 +46,9 @@ export function applyEvent(previous: Json, event: Json, receivedAt = Date.now())
   const p = event.params || {};
   const next: Json = { ...previous, turns: [...(previous.turns || [])] };
   if (method === "thread/started" && p.thread) return { ...next, ...p.thread };
+  if (method === "thread/name/updated") { next.name = p.threadName ?? p.name; return next; }
+  if (method === "thread/goal/updated") { next.goal = p.goal; return next; }
+  if (method === "thread/goal/cleared") { next.goal = null; return next; }
   if (method === "thread/status/changed") { next.status = p.status; return next; }
   if (method === "thread/tokenUsage/updated") {
     next.tokenUsage = p.tokenUsage;
@@ -82,7 +85,8 @@ export function applyEvent(previous: Json, event: Json, receivedAt = Date.now())
     else if (method.includes("reasoning")) item.text = (item.text || "") + (p.delta || "");
     else item.text = (item.text || "") + (p.delta || "");
     turn.items[itemIndex] = item;
-  } else if (method === "turn/diff/updated") turn.diff = p.diff;
+  } else if (method === "turn/plan/updated") { turn.plan = p.plan; turn.planExplanation = p.explanation; }
+  else if (method === "turn/diff/updated") turn.diff = p.diff;
   return next;
 }
 

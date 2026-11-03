@@ -6,6 +6,7 @@ pub mod host;
 pub mod model;
 pub mod net;
 pub mod projects;
+mod prompts;
 pub mod relay;
 pub mod remote;
 pub mod tunnel;

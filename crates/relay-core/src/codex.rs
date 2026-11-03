@@ -201,7 +201,7 @@ impl Codex {
         startup.disarm();
         Ok(client)
     }
-    pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+    pub async fn call(&self, method: &str, mut params: Value) -> Result<Value> {
         if method == "relay/environment" {
             if params["refresh"] == true { self.installation.lock().await.executable = None; }
             let path = self.executable().await;
@@ -213,6 +213,10 @@ impl Codex {
                 }
                 Err(error) => Ok(json!({"installed":false,"error":error.to_string()})),
             };
+        }
+        if method == "relay/prompts" {
+            ensure!(params.as_object().is_some_and(|params| params.is_empty()), "自定义命令列表不接受额外参数");
+            return tokio::task::spawn_blocking(crate::prompts::list).await?;
         }
         let client = self.get().await?;
         if method == "relay/projects" {
@@ -256,7 +260,7 @@ impl Codex {
             let _ = self.events.send(json!({"method":"relay/approvalResolved","params":{"id":id}}));
             return Ok(json!({}));
         }
-        ensure!(matches!(method,"thread/list"|"thread/read"|"thread/start"|"thread/resume"|"thread/archive"|"thread/unarchive"|"thread/turns/list"|"thread/items/list"|"turn/start"|"turn/interrupt"|"model/list"|"account/read"|"fuzzyFileSearch"|"app/list"|"skills/list"), "不支持的 Codex 操作");
+        ensure!(matches!(method,"thread/list"|"thread/read"|"thread/start"|"thread/resume"|"thread/archive"|"thread/unarchive"|"thread/turns/list"|"thread/items/list"|"thread/compact/start"|"thread/fork"|"thread/name/set"|"thread/goal/get"|"thread/goal/set"|"thread/goal/clear"|"review/start"|"collaborationMode/list"|"mcpServerStatus/list"|"account/rateLimits/read"|"turn/start"|"turn/interrupt"|"model/list"|"account/read"|"fuzzyFileSearch"|"app/list"|"skills/list"), "不支持的 Codex 操作");
         ensure!(params.is_object(), "参数必须是对象");
         if matches!(method, "fuzzyFileSearch" | "app/list" | "skills/list") {
             let allowed: &[&str] = match method {
@@ -315,9 +319,95 @@ impl Codex {
             let allowed: &[&str] = match method {
                 "thread/start" => &["cwd","model","projectId"],
                 "thread/resume" => &["threadId"],
-                _ => &["threadId","input","model","effort"],
+                _ => &["threadId","input","model","effort","collaborationMode","serviceTier"],
             };
             ensure!(params.as_object().unwrap().keys().all(|k|allowed.contains(&k.as_str())), "请求包含未开放的权限或配置字段");
+        }
+        if method == "turn/start" {
+            if let Some(mode) = params.get("collaborationMode") {
+                ensure!(mode.as_object().is_some_and(|object| object.len() == 2 && object.contains_key("mode") && object.contains_key("settings")), "协作模式格式无效");
+                ensure!(matches!(mode["mode"].as_str(), Some("default" | "plan")), "协作模式无效");
+                let settings = mode["settings"].as_object().ok_or_else(||anyhow!("协作模式设置无效"))?;
+                ensure!(settings.len() == 3 && settings.keys().all(|key| ["model","reasoning_effort","developer_instructions"].contains(&key.as_str())), "协作模式包含未开放的配置字段");
+                ensure!(mode["settings"]["developer_instructions"].is_null(), "协作模式只能使用 Codex 内置指令");
+                ensure!(mode["settings"]["model"].as_str().is_some_and(|model| !model.is_empty() && model.len() <= 200), "协作模式缺少模型");
+                ensure!(mode["settings"]["reasoning_effort"].is_null() || matches!(mode["settings"]["reasoning_effort"].as_str(), Some("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra")), "推理强度无效");
+            }
+            if let Some(tier) = params.get("serviceTier") {
+                ensure!(tier.as_str().is_some_and(|tier| !tier.is_empty() && tier.len() <= 100), "服务档位无效");
+            }
+        }
+        if matches!(method, "collaborationMode/list" | "account/rateLimits/read") {
+            ensure!(params.as_object().unwrap().is_empty(), "查询包含未开放的字段");
+        }
+        if method == "mcpServerStatus/list" {
+            ensure!(params.as_object().unwrap().keys().all(|key| ["cursor","limit","threadId"].contains(&key.as_str())), "MCP 查询包含未开放的字段");
+            if let Some(limit) = params.get("limit") { ensure!(limit.as_u64().is_some_and(|limit| limit > 0 && limit <= 100), "MCP 分页数量无效"); }
+            if let Some(cursor) = params.get("cursor").filter(|value| !value.is_null()) { ensure!(cursor.as_str().is_some_and(|cursor| cursor.len() <= 4096), "MCP 分页标识无效"); }
+            if let Some(thread) = params.get("threadId") { ensure!(thread.as_str().is_some_and(|id| !id.is_empty() && id.len() <= 200), "MCP 会话标识无效"); }
+        }
+        if matches!(method, "thread/compact/start" | "thread/fork" | "thread/name/set" | "review/start" | "thread/goal/get" | "thread/goal/set" | "thread/goal/clear") {
+            let allowed: &[&str] = match method {
+                "thread/name/set" => &["threadId","name"],
+                "review/start" => &["threadId","target"],
+                "thread/goal/set" => &["threadId","objective","status","tokenBudget"],
+                _ => &["threadId"],
+            };
+            ensure!(params.as_object().unwrap().keys().all(|key| allowed.contains(&key.as_str())), "命令包含未开放的字段");
+            let thread = params["threadId"].as_str().filter(|id| !id.is_empty() && id.len() <= 200).ok_or_else(||anyhow!("缺少或无效的会话标识"))?.to_owned();
+            if method == "thread/name/set" {
+                ensure!(params["name"].as_str().is_some_and(|name| !name.trim().is_empty() && name.len() <= 512), "会话名称无效或过长");
+            }
+            if method == "review/start" {
+                let target = params["target"].as_object().ok_or_else(||anyhow!("审查目标无效"))?;
+                let field = match params["target"]["type"].as_str() {
+                    Some("uncommittedChanges") => None,
+                    Some("baseBranch") => Some("branch"),
+                    Some("commit") => Some("sha"),
+                    Some("custom") => Some("instructions"),
+                    _ => bail!("审查类型无效"),
+                };
+                ensure!(target.keys().all(|key| key == "type" || Some(key.as_str()) == field || (field == Some("sha") && key == "title")), "审查目标包含未开放的字段");
+                if let Some(field) = field { ensure!(params["target"][field].as_str().is_some_and(|text| !text.trim().is_empty() && text.len() <= 16000), "请填写审查目标"); }
+            }
+            if method == "thread/goal/set" {
+                if let Some(objective) = params.get("objective") { ensure!(objective.as_str().is_some_and(|text| !text.trim().is_empty() && text.len() <= 32000), "目标内容无效"); }
+                if let Some(status) = params.get("status") { ensure!(matches!(status.as_str(), Some("active" | "paused")), "目标状态无效"); }
+                if let Some(budget) = params.get("tokenBudget").filter(|value| !value.is_null()) { ensure!(budget.as_u64().is_some_and(|value| value > 0), "目标预算必须为正整数"); }
+                params["origin"] = json!("user");
+            }
+            if method == "thread/goal/clear" { params["origin"] = json!("user"); }
+            let start_lock = lock(&client.start_locks).entry(thread.clone()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
+            let _start_guard = start_lock.lock().await;
+            ensure!(!lock(&client.archived).contains(&thread), "请先恢复已归档的会话");
+            let starts_work = matches!(method, "thread/compact/start" | "review/start");
+            let needs_idle = starts_work || method == "thread/fork";
+            if needs_idle {
+                ensure!(!lock(&client.active).contains_key(&thread), "请等待当前回合结束后执行此命令");
+                ensure!(!lock(&client.approvals).values().any(|approval| approval.message["params"]["threadId"].as_str() == Some(thread.as_str())), "请先处理此会话的待办审批");
+            }
+            if matches!(method, "thread/compact/start" | "thread/fork") { ensure!(!lock(&client.unmaterialized).contains_key(&thread), "发送首条消息后才可执行此命令"); }
+            if starts_work {
+                client.resume(&thread).await?;
+                let mut active = lock(&client.active);
+                ensure!(!active.contains_key(&thread), "此会话已有回合正在运行");
+                active.insert(thread.clone(), "relay:pending-command".into());
+            }
+            if method == "thread/fork" { params["excludeTurns"] = json!(true); params["deferGoalContinuation"] = json!(true); }
+            let response = client.request(method, params).await;
+            if starts_work {
+                match &response {
+                    Ok(value) => {
+                        if let Some(turn) = value["turn"]["id"].as_str() {
+                            lock(&client.unmaterialized).remove(&thread);
+                            // A completed notification may precede the response.
+                            if let Some(active) = lock(&client.active).get_mut(&thread) { if active.as_str() == "relay:pending-command" { *active = turn.into(); } }
+                        }
+                    }
+                    Err(_) => { lock(&client.active).remove(&thread); }
+                }
+            }
+            return response;
         }
         if matches!(method, "thread/archive" | "thread/unarchive") {
             ensure!(params.as_object().unwrap().keys().all(|key| key == "threadId"), "归档请求包含未开放的字段");
@@ -343,6 +433,7 @@ impl Codex {
             let thread = params["threadId"].as_str().ok_or_else(||anyhow!("缺少会话标识"))?.to_string();
             let start_lock=lock(&client.start_locks).entry(thread.clone()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
             let _start_guard=start_lock.lock().await;
+            ensure!(!lock(&client.active).contains_key(&thread), "此会话已有回合正在运行");
             client.resume(&thread).await?;
             {
                 let mut active = lock(&client.active);
@@ -411,7 +502,7 @@ impl Client {
         let result = self.request("thread/resume",json!({"threadId":id,"excludeTurns":true})).await.map_err(|error| anyhow!("无法接续此会话：{error:#}"))?;
         ensure!(!self.ended.is_cancelled(), "Codex 进程连接已结束");
         let mut active = lock(&self.active);
-        active.remove(id);
+        if !active.get(id).is_some_and(|turn| turn.as_str() == "relay:pending-command") { active.remove(id); }
         if result["thread"]["status"]["type"]=="active" { active.insert(id.into(),String::new()); }
         if let Some(turns) = result["thread"]["turns"].as_array() {
             for turn in turns {
