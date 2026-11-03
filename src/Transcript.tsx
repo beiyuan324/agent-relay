@@ -1,7 +1,7 @@
 import { createContext, memo, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AlertCircle, Blocks, ChevronDown, ChevronRight, FileCode2, ListChecks, Loader2, MessageSquare, X } from "lucide-react";
+import { AlertCircle, Blocks, ChevronRight, FileCode2, ListChecks, Loader2, MessageSquare, X } from "lucide-react";
 import type { Json } from "./api";
 import { messageBody, messageLinks, referenceKind, type MessageReference } from "./message-text";
 import { ToolActivity, ToolActivityGroup } from "./ToolActivity";
@@ -77,12 +77,8 @@ const Item = memo(function Item({ item, active = false }: { item: Json; active?:
       return <div className="command-transcript-note">开始代码审查{item.review ? " · " + item.review : ""}</div>;
     case "exitedReviewMode":
       return <section className="message agent-message"><div className="message-label">代码审查结果</div><Markdown text={item.review || "审查已结束。"} /></section>;
-    case "reasoning": {
-      const summaries = (item.summary || []).map((entry: string | Json) => typeof entry === "string" ? entry : entry.text || "");
-      const text = item.text || [...summaries, ...(item.content || []).map((entry: string | Json) => typeof entry === "string" ? entry : entry.text || "")].join("\n");
-      const heading = (summaries.find((entry: string) => entry.trim()) || text).split(/\r?\n/).find((line: string) => line.trim())?.replace(/[*\u0060#]/g, "").trim() || "思考过程";
-      return text ? <details className="reasoning"><summary title={heading}><span className="reasoning-title">{heading}</span><ChevronDown size={12} className="activity-chevron" /></summary><div className="reasoning-body"><Markdown text={text} /></div></details> : null;
-    }
+    case "reasoning":
+      return null;
     default:
       return <ToolActivity item={item} active={active} />;
   }
@@ -135,7 +131,8 @@ const Turn = memo(function Turn({ turn, running }: { turn: Json; running: boolea
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [active]);
-  const items: Json[] = turn.items || [];
+  // Hide reasoning before grouping so it neither splits tool calls nor creates empty process sections.
+  const items: Json[] = (turn.items || []).filter((item: Json) => item.type !== "reasoning");
   const users = items.filter(item => item.type === "userMessage");
   const answers = new Set(items.filter(item => item.type === "plan" || item.type === "contextCompaction" || item.type === "exitedReviewMode" || (
     item.type === "agentMessage" && ["partial_answer", "final_answer", "final"].includes(item.phase)
