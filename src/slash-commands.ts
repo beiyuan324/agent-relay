@@ -20,7 +20,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { id: "fork", label: "分叉会话", description: "复制当前会话历史，继续新的对话", keywords: "branch 分支" },
   { id: "rename", label: "重命名会话", description: "修改当前会话的名称" },
   { id: "archive", label: "归档会话", description: "归档当前会话，可从归档列表恢复" },
-  { id: "goal", label: "目标模式", description: "设置持续目标，或管理现有目标", keywords: "objective 持续任务" },
+  { id: "goal", label: "目标", description: "设置持续目标，或管理现有目标", keywords: "objective 持续任务" },
   { id: "status", label: "会话状态", description: "查看会话、模型、上下文和账户额度" },
   { id: "usage", label: "账户额度", description: "查看执行电脑当前账户的使用额度及重置时间" },
   { id: "mcp", label: "MCP 状态", description: "查看执行电脑上的 MCP 服务及连接状态", keywords: "tools 工具" },

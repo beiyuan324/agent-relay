@@ -207,32 +207,29 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
   };
   return <div className="mention-composer" ref={anchor}>
     {slashOpen && createPortal(<div className="mention-menu slash-menu" style={menuStyle}>
-      <div className="mention-menu-heading"><strong>命令与技能</strong><span title={deviceName}>{deviceName}</span></div>
+      <div className="mention-menu-heading"><strong>命令与技能</strong></div>
       <div className="mention-options" id={menuId} role="listbox" aria-label="选择命令或技能" ref={list}>
         {slashOptions.map((option, index) => <button type="button" role="option" aria-selected={index === selectedSlashIndex} aria-disabled={!!option.command?.disabledReason} data-active={index === selectedSlashIndex} id={menuId + "-" + index} className={"mention-option " + (index === selectedSlashIndex ? "active" : "")} key={option.key} title={option.command?.disabledReason || option.command?.description || option.target?.detail} onMouseDown={event => event.preventDefault()} onMouseMove={() => setSlashIndex(index)} onClick={() => chooseSlash(index)}>
-          <span className="mention-option-copy"><strong>{option.command ? "/" + option.command.id : "/" + option.target!.name}<span className="slash-command-label">{option.command?.label}</span></strong><small>{option.command?.disabledReason || option.command?.description || option.target?.detail}</small></span>
-          <span className="mention-kind">{option.target ? "技能" : "命令"}</span>
+          <span className="mention-option-copy"><strong>{option.command ? "/" + option.command.id : "/" + option.target!.name}<span className="slash-command-label">{option.command?.label}</span></strong>{(option.command?.disabledReason || option.target?.detail) && <small>{option.command?.disabledReason || option.target?.detail}</small>}</span>
         </button>)}
-        {!slashOptions.length && <div className="mention-empty">没有匹配的命令或技能。按 Esc 关闭并继续编辑。</div>}
+        {!slashOptions.length && <div className="mention-empty">没有匹配的命令或技能</div>}
         {catalog.loading && <div className="mention-loading"><Loader2 size={14} className="spin" />正在读取项目技能…</div>}
       </div>
       {!!catalog.errors.length && <div className="mention-search-hint" role="status">{catalog.errors.join("；")}</div>}
       {commandError && <div className="mention-search-hint" role="status">自定义命令：{commandError}</div>}
-      <div className="mention-menu-footer">↑↓ 选择 · Enter / Tab 执行 · Esc 关闭</div>
     </div>, document.body)}
     {open && createPortal(<div className="mention-menu" style={menuStyle}>
-      <div className="mention-menu-heading">{skillsOnly ? <Sparkles size={15} /> : <AtSign size={15} />}<strong>{skillsOnly ? "使用技能" : "引用"}</strong><span title={deviceName}>{deviceName}</span><button type="button" className="icon-button" title={skillsOnly ? "刷新技能列表" : "刷新引用列表"} aria-label={skillsOnly ? "刷新技能列表" : "刷新引用列表"} onMouseDown={event => event.preventDefault()} onClick={() => setRevision(previous => previous + 1)}><RefreshCw size={13} /></button></div>
+      <div className="mention-menu-heading">{skillsOnly ? <Sparkles size={15} /> : <AtSign size={15} />}<strong>{skillsOnly ? "使用技能" : "引用"}</strong><button type="button" className="icon-button" title={skillsOnly ? "刷新技能列表" : "刷新引用列表"} aria-label={skillsOnly ? "刷新技能列表" : "刷新引用列表"} onMouseDown={event => event.preventDefault()} onClick={() => setRevision(previous => previous + 1)}><RefreshCw size={13} /></button></div>
       {!skillsOnly && <div className="mention-tabs" role="group" aria-label="引用类型">{tabs.map(item => <button type="button" key={item.id} aria-pressed={tab === item.id} className={tab === item.id ? "selected" : ""} onMouseDown={event => event.preventDefault()} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>}
       <div className="mention-options" id={menuId} role="listbox" aria-label={skillsOnly ? "选择技能" : "选择引用"} aria-busy={loading} ref={list}>
-        {options.map((target, index) => <button type="button" role="option" aria-selected={index === activeIndex} data-active={index === activeIndex} id={menuId + "-" + index} className={"mention-option " + (index === activeIndex ? "active" : "")} key={target.kind + ":" + target.path} title={target.detail} onMouseDown={event => event.preventDefault()} onMouseMove={() => setActiveIndex(index)} onClick={() => choose(target)}>
-          <span className="mention-option-icon"><TargetIcon kind={target.kind} /></span><span className="mention-option-copy"><strong>{target.kind === "skill" ? "$" + target.name : target.label}</strong><small>{target.detail}</small></span><span className="mention-kind">{labels[target.kind]}</span>
+        {options.map((target, index) => <button type="button" role="option" aria-selected={index === activeIndex} data-active={index === activeIndex} id={menuId + "-" + index} className={"mention-option " + (index === activeIndex ? "active" : "")} key={target.kind + ":" + target.path} aria-label={`${labels[target.kind]}：${target.label}，${target.detail}`} title={target.detail} onMouseDown={event => event.preventDefault()} onMouseMove={() => setActiveIndex(index)} onClick={() => choose(target)}>
+          <span className="mention-option-icon"><TargetIcon kind={target.kind} /></span><span className="mention-option-copy"><strong>{target.kind === "skill" ? "$" + target.name : target.label}</strong><small>{target.detail}</small></span>
         </button>)}
         {!options.length && !loading && <div className="mention-empty">{skillsOnly ? cwd ? "没有匹配的技能。" : "当前会话未提供项目路径，无法读取技能。" : !query && (tab === "files" || tab === "all") ? "输入文件名，搜索当前项目。" : "没有匹配的引用。"}</div>}
         {loading && <div className="mention-loading"><Loader2 size={14} className="spin" />正在读取候选…</div>}
       </div>
-      {!skillsOnly && !query && (tab === "all" || tab === "files") && <div className="mention-search-hint">{cwd ? "继续输入可搜索项目文件和目录。" : "当前会话未提供项目路径，无法搜索文件。"}</div>}
+      {!skillsOnly && !cwd && (tab === "all" || tab === "files") && <div className="mention-search-hint" role="status">当前会话未提供项目路径，无法搜索文件。</div>}
       {!!errors.length && <details className="mention-query-errors"><summary>部分候选暂不可用</summary>{errors.map((error, index) => <p key={index}>{error}</p>)}</details>}
-      <div className="mention-menu-footer">↑↓ 选择 · Enter / Tab 插入 · Esc 关闭</div>
     </div>, document.body)}
     <textarea ref={inputRef} aria-label={"向 " + deviceName + " 发送消息"} role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={popupOpen} aria-controls={popupOpen ? menuId : undefined} aria-activedescendant={slashOpen && slashOptions[selectedSlashIndex] ? menuId + "-" + selectedSlashIndex : open && options[activeIndex] ? menuId + "-" + activeIndex : undefined} placeholder={placeholder} value={draft.text} rows={2}
       onChange={event => { onChange(editDraft(draft, event.target.value)); setCaret({ start: event.target.selectionStart, end: event.target.selectionEnd }); }}
@@ -276,9 +273,9 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
       }} />
     {!!validMentions(draft).length && <div className="mention-chips" aria-label="已选引用">{validMentions(draft).map(mention => <span className="mention-chip" key={mention.start + ":" + mention.path} title={mention.path}><TargetIcon kind={mention.kind} /><span>{mention.kind === "skill" ? "$" + mention.name : mention.label}</span><button type="button" aria-label={"移除引用 " + mention.label} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(removeMention(draft, mention)); focusAt(mention.start); }}><X size={12} /></button></span>)}</div>}
     <div className="mention-shortcuts">
-      {onCommand && <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 / 打开命令菜单" onMouseDown={event => event.preventDefault()} onClick={() => { const body = draft.text.startsWith("/") ? draft.text.replace(/^\/[^\s]*\s*/, "") : draft.text; onChange(editDraft(draft, "/" + (body ? " " + body : ""))); setDismissed(""); focusAt(1); }}><span className="slash-symbol" aria-hidden="true">/</span>命令</button>}
-      <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 @ 引用文件、目录或应用" onMouseDown={event => event.preventDefault()} onClick={() => startReference("@")}><AtSign size={13} />引用文件或应用</button>
-      <button type="button" className="mention-shortcut" disabled={!enabled} title="输入 $ 使用技能" onMouseDown={event => event.preventDefault()} onClick={() => startReference("$")}><Sparkles size={13} />$ 使用技能</button>
+      {onCommand && <button type="button" className="mention-shortcut" disabled={!enabled} aria-label="命令" title="命令 (/)" onMouseDown={event => event.preventDefault()} onClick={() => { const body = draft.text.startsWith("/") ? draft.text.replace(/^\/[^\s]*\s*/, "") : draft.text; onChange(editDraft(draft, "/" + (body ? " " + body : ""))); setDismissed(""); focusAt(1); }}><span className="slash-symbol" aria-hidden="true">/</span></button>}
+      <button type="button" className="mention-shortcut" disabled={!enabled} aria-label="引用文件或应用" title="引用文件或应用 (@)" onMouseDown={event => event.preventDefault()} onClick={() => startReference("@")}><AtSign size={16} /></button>
+      <button type="button" className="mention-shortcut" disabled={!enabled} aria-label="使用技能" title="使用技能 ($)" onMouseDown={event => event.preventDefault()} onClick={() => startReference("$")}><Sparkles size={16} /></button>
     </div>
   </div>;
 }
