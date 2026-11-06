@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Context, Result};
-use directories::ProjectDirs;
 use relay_core::{host::Host, relay, AppEvent, ConnectionMode, Settings};
 use serde::Serialize;
 use serde_json::Value;
@@ -137,6 +136,16 @@ async fn save_settings(state:State<'_,Arc<Desktop>>,codex_path:String,relay_url:
     state.host.update_settings(codex_path,relay_url,theme,name).await.map_err(error)?;state.save().await.map_err(error)
 }
 
+// 保留既有配置目录命名，让升级后的应用继续读取原设置。
+fn settings_path(config_dir: PathBuf, platform: &str) -> PathBuf {
+    let subdirectory = match platform {
+        "windows" => "agent-relay/Relay/config",
+        "macos" => "app.agent-relay.Relay",
+        _ => "relay",
+    };
+    config_dir.join(subdirectory).join("settings.json")
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -144,8 +153,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(tray::on_window_event)
         .setup(|app|{
-            let directories=ProjectDirs::from("app","agent-relay","Relay").ok_or_else(||anyhow!("无法定位用户设置目录"))?;
-            let path=directories.config_dir().join("settings.json");
+            let config_dir=app.path().config_dir().context("无法定位用户设置目录")?;
+            let path=settings_path(config_dir,std::env::consts::OS);
             let settings=match std::fs::read(&path) {
                 Ok(bytes)=>serde_json::from_slice::<Settings>(&bytes).context("设置文件损坏。原文件已保留，请修复或重命名后重新启动")?,
                 Err(error)if error.kind()==std::io::ErrorKind::NotFound=>Settings::default(),
@@ -228,6 +237,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_path_preserves_platform_layouts() {
+        let root=PathBuf::from("用户 配置");
+        for (platform, suffix) in [
+            ("windows", "agent-relay/Relay/config/settings.json"),
+            ("macos", "app.agent-relay.Relay/settings.json"),
+            ("linux", "relay/settings.json"),
+        ] {
+            assert_eq!(settings_path(root.clone(),platform),root.join(suffix));
+        }
+    }
 
     fn desktop(path: PathBuf) -> Desktop {
         Desktop { host: Host::new(Settings::default()), path, mutation: Mutex::new(()),
