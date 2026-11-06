@@ -119,9 +119,7 @@ export class RelayRoom implements DurableObject {
         // it hasn't opened. A failed send kills the tunnel at birth.
         if (!this.#send(agent, JSON.stringify({ t: "wopen", id: att.id, path: "/__alma_e2e__" }))) {
           this.#phones.delete(att.id);
-          try {
-            server.close(1011, "agent disconnected");
-          } catch {}
+          this.#close(server, 1011, "agent disconnected");
         } else {
           this.#phones.set(att.id, server);
         }
@@ -152,9 +150,7 @@ export class RelayRoom implements DurableObject {
       for (const w of this.#state.getWebSockets("phone")) {
         const pa = w.deserializeAttachment() as PhoneAtt | undefined;
         if (pa?.id) {
-          try {
-            w.close(1011, "agent disconnected");
-          } catch {}
+          this.#close(w, 1011, "agent disconnected");
         }
       }
       this.#phones.clear();
@@ -197,16 +193,14 @@ export class RelayRoom implements DurableObject {
           pa.id = null;
           pa.deadline = null;
           phone.serializeAttachment(pa);
-          try { phone.close(1012, "agent replaced"); } catch {}
+          this.#close(phone, 1012, "agent replaced");
         }
         this.#phones.clear();
         // Demote before closing so the old agent's close callback is a no-op.
         for (const other of this.#state.getWebSockets("agent")) {
           if (other === ws) continue;
           other.serializeAttachment({ role: "agent", reg: false } as AgentAtt);
-          try {
-            other.close(4000, "Another agent took over this pairing");
-          } catch {}
+          this.#close(other, 4000, "Another agent took over this pairing");
         }
         ws.serializeAttachment({ role: "agent", reg: true } as AgentAtt);
         this.#send(ws, JSON.stringify({ t: "registered" }));
@@ -234,9 +228,7 @@ export class RelayRoom implements DurableObject {
           phone.serializeAttachment(pa);
         }
         this.#phones.delete(String(msg.id));
-        try {
-          phone.close(msg.code ?? 1000, String(msg.reason ?? ""));
-        } catch {}
+        this.#close(phone, msg.code ?? 1000, msg.reason ?? "");
         break;
       }
       // wopened / werr need no server action; the phone learns outcomes
@@ -289,9 +281,7 @@ export class RelayRoom implements DurableObject {
     for (const ws of this.#state.getWebSockets("phone")) {
       const att = ws.deserializeAttachment() as PhoneAtt | undefined;
       if (!att || att.id || att.deadline === null || now < att.deadline) continue;
-      try {
-        ws.close(4404, "No agent connected for this pairing");
-      } catch {}
+      this.#close(ws, 4404, "No agent connected for this pairing");
     }
     await this.#armPendingAlarm();
   }
@@ -309,9 +299,7 @@ export class RelayRoom implements DurableObject {
     if (!this.#send(agent, JSON.stringify({ t: "wopen", id, path: "/__alma_e2e__" }))) {
       att.id = null;
       ws.serializeAttachment(att);
-      try {
-        ws.close(1011, "agent disconnected");
-      } catch {}
+      this.#close(ws, 1011, "agent disconnected");
       return null;
     }
     this.#phones.set(id, ws);
@@ -357,6 +345,10 @@ export class RelayRoom implements DurableObject {
       if (att?.id) this.#phones.set(att.id, ws);
     }
     return this.#phones.get(id) ?? null;
+  }
+
+  #close(ws: WebSocket, code: number, reason: unknown): void {
+    try { ws.close(code, String(reason)); } catch {}
   }
 
   #send(ws: WebSocket, data: string): boolean {

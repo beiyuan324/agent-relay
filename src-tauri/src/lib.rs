@@ -44,6 +44,18 @@ impl Desktop {
         *saved=Some(bytes);
         Ok(())
     }
+    async fn add_pair(&self,config:relay_core::PairConfig,code:String)->Result<String,String> {
+        let id=config.id.clone();
+        credential(&id).and_then(|entry|entry.set_password(&code).map_err(|_|anyhow!("无法保存配对密钥到系统凭据存储"))).map_err(error)?;
+        if let Err(failure)=self.host.add(config,code).await {
+            let _=credential(&id).and_then(|e|e.delete_credential().map_err(Into::into));return Err(error(failure));
+        }
+        if let Err(failure)=self.save().await {
+            let _=self.host.remove(&id).await;
+            let _=credential(&id).and_then(|e|e.delete_credential().map_err(Into::into));return Err(error(failure));
+        }
+        Ok(id)
+    }
     async fn snapshot(&self)->Snapshot {
         let settings=self.host.snapshot().await;
         Snapshot {addresses:relay::addresses(settings.listen_port),settings,devices:self.host.views().await,diagnostics:self.diagnostics.lock().await.iter().cloned().collect(),listener_error:self.host.listener_error().await}
@@ -80,15 +92,7 @@ async fn create_invitation(state:State<'_,Arc<Desktop>>,endpoint:String,mode:Con
     }
     if state.host.views().await.len()>=32{return Err("最多保存 32 对设备，请先移除不用的邀请".into());}
     let (config,code,uri)=relay::create_invitation(&endpoint,mode).map_err(error)?;
-    let id=config.id.clone();
-    credential(&id).and_then(|entry|entry.set_password(&code).map_err(|_|anyhow!("无法保存配对密钥到系统凭据存储"))).map_err(error)?;
-    if let Err(failure)=state.host.add(config,code).await {
-        let _=credential(&id).and_then(|e|e.delete_credential().map_err(Into::into));return Err(error(failure));
-    }
-    if let Err(failure)=state.save().await {
-        let _=state.host.remove(&id).await;
-        let _=credential(&id).and_then(|e|e.delete_credential().map_err(Into::into));return Err(error(failure));
-    }
+    let id=state.add_pair(config,code).await?;
     Ok(serde_json::json!({"id":id,"uri":uri}))
 }
 #[tauri::command]
@@ -98,15 +102,7 @@ async fn join_invitation(state:State<'_,Arc<Desktop>>,uri:String)->Result<String
     let id=config.id.clone();
     if state.host.views().await.iter().any(|device|device.id==id){return Err("此配对已经添加，请在设备详情中重新连接".into());}
     if state.host.views().await.len()>=32{return Err("最多保存 32 对设备".into());}
-    credential(&id).and_then(|entry|entry.set_password(&code).map_err(|_|anyhow!("无法保存配对密钥到系统凭据存储"))).map_err(error)?;
-    if let Err(failure)=state.host.add(config,code).await {
-        let _=credential(&id).and_then(|e|e.delete_credential().map_err(Into::into));return Err(error(failure));
-    }
-    if let Err(failure)=state.save().await {
-        let _=state.host.remove(&id).await;
-        let _=credential(&id).and_then(|e|e.delete_credential().map_err(Into::into));return Err(error(failure));
-    }
-    Ok(id)
+    state.add_pair(config,code).await
 }
 #[tauri::command]
 async fn approve_device(state:State<'_,Arc<Desktop>>,id:String)->Result<(),String>{

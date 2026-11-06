@@ -377,8 +377,7 @@ impl Codex {
                 params["origin"] = json!("user");
             }
             if method == "thread/goal/clear" { params["origin"] = json!("user"); }
-            let start_lock = lock(&client.start_locks).entry(thread.clone()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
-            let _start_guard = start_lock.lock().await;
+            let _start_guard = client.lock_thread(&thread).await;
             ensure!(!lock(&client.archived).contains(&thread), "请先恢复已归档的会话");
             let starts_work = matches!(method, "thread/compact/start" | "review/start");
             let needs_idle = starts_work || method == "thread/fork";
@@ -412,8 +411,7 @@ impl Codex {
         if matches!(method, "thread/archive" | "thread/unarchive") {
             ensure!(params.as_object().unwrap().keys().all(|key| key == "threadId"), "归档请求包含未开放的字段");
             let thread = params["threadId"].as_str().filter(|id| !id.is_empty() && id.len() <= 200).ok_or_else(||anyhow!("缺少或无效的会话标识"))?.to_owned();
-            let start_lock = lock(&client.start_locks).entry(thread.clone()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
-            let _start_guard = start_lock.lock().await;
+            let _start_guard = client.lock_thread(&thread).await;
             if method == "thread/archive" {
                 ensure!(!lock(&client.unmaterialized).contains_key(&thread), "发送首条消息后才可归档会话");
                 ensure!(!lock(&client.active).contains_key(&thread), "请等待当前任务结束后再归档");
@@ -431,8 +429,7 @@ impl Codex {
         }
         if method == "turn/start" {
             let thread = params["threadId"].as_str().ok_or_else(||anyhow!("缺少会话标识"))?.to_string();
-            let start_lock=lock(&client.start_locks).entry(thread.clone()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
-            let _start_guard=start_lock.lock().await;
+            let _start_guard=client.lock_thread(&thread).await;
             ensure!(!lock(&client.active).contains_key(&thread), "此会话已有回合正在运行");
             client.resume(&thread).await?;
             {
@@ -454,8 +451,7 @@ impl Codex {
         }
         if method == "thread/resume" {
             let thread = params["threadId"].as_str().ok_or_else(||anyhow!("缺少会话标识"))?;
-            let start_lock = lock(&client.start_locks).entry(thread.into()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
-            let _start_guard = start_lock.lock().await;
+            let _start_guard = client.lock_thread(thread).await;
             return client.resume(thread).await;
         }
         let mut result = client.request(method,params).await?;
@@ -470,6 +466,10 @@ impl Codex {
     }
 }
 impl Client {
+    async fn lock_thread(&self, thread: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let start_lock = lock(&self.start_locks).entry(thread.into()).or_insert_with(||Arc::new(Mutex::new(()))).clone();
+        start_lock.lock_owned().await
+    }
     async fn write(&self, value: Value) -> Result<()> {
         ensure!(!self.ended.is_cancelled(), "Codex 进程连接已结束");
         let mut data = serde_json::to_vec(&value)?; data.push(b'\n');

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, Archive, ArchiveRestore, ArrowUp, ChevronDown, ChevronRight, CircleHelp, FileCode2, Folder, Globe2, Laptop, Loader2, LockKeyhole, Monitor, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, Settings2, ShieldCheck, Square, Wifi, X } from "lucide-react";
 import { call, command, desktop, message, stateLabels, subscribe, title, when, type Device, type Json, type Snapshot } from "./api";
 import { useWorkbench } from "./workbench";
+import { isThreadApproval } from "./approvals";
+import { deviceKey as projectKey } from "./workbench-state";
 import { updateProgress, useUpdates } from "./updates";
 import { groupProjectThreads, type CodexProject, type ProjectGroup } from "./projects";
 import { WindowTitlebar } from "./WindowTitlebar";
@@ -20,7 +22,6 @@ type Dialog = "pair" | "settings" | "new" | "diagnostics" | "help" | null;
 const collapsedProjectsKey = "relay.collapsedProjects";
 const deviceSidebarKey = "relay.deviceSidebarCollapsed";
 const referenceLabels: Record<string, string> = { plugin: "插件", app: "应用", file: "文件" };
-const projectKey = (device: string, cwd: string) => JSON.stringify([device, cwd]);
 function readCollapsedProjects(): Record<string, boolean> {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(collapsedProjectsKey) || "{}");
@@ -229,7 +230,7 @@ export default function App() {
     let disabledReason: string | undefined;
     if (["compact", "fork", "review", "rename", "archive", "goal"].includes(command.id) && !persisted) disabledReason = "发送首条消息后可使用";
     if (["compact", "fork", "review", "archive"].includes(command.id) && occupied) disabledReason = "请等待当前回合结束并处理待发消息";
-    if (["compact", "review", "fork", "archive"].includes(command.id) && workbench.requests.some(request => !request.params?.threadId || request.params.threadId === workbench.selected)) disabledReason = "请先处理当前会话的待办审批";
+    if (["compact", "review", "fork", "archive"].includes(command.id) && workbench.requests.some(request => isThreadApproval(request, workbench.selected))) disabledReason = "请先处理当前会话的待办审批";
     if (command.id === "plan" && !planPreset && workbench.mode !== "plan") disabledReason = modeCatalog.error ? "执行电脑不支持计划模式，请升级 Codex" : "正在读取可用的协作模式";
     if (command.id === "fast" && !fastTier) disabledReason = "当前模型未提供 Fast 服务档位";
     if (command.id === "reasoning" && !efforts.length) disabledReason = "当前模型未提供可选择的推理强度";
@@ -422,7 +423,7 @@ export default function App() {
       setCreatingProjectKey(null);
     }
   };
-  const approvalForThread = workbench.requests.filter(request => !request.params?.threadId || request.params.threadId === workbench.selected);
+  const approvalForThread = workbench.requests.filter(request => isThreadApproval(request, workbench.selected));
   const renderProjectGroups = (groups: ProjectGroup[], archived: boolean) => groups.map(group => {
     const { threads } = group;
     const cwd = group.rootPaths[0];

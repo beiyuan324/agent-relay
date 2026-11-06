@@ -1,5 +1,7 @@
 import type { Json } from "./api";
 
+export const isThreadApproval = (request: Json, threadId: string | null) => !request.params?.threadId || request.params.threadId === threadId;
+
 export interface ApprovalChoice { decision: unknown; label: string; primary: boolean }
 export function approvalChoices(request: Json): ApprovalChoice[] {
   const available: unknown[] = request.method === "item/commandExecution/requestApproval" && Array.isArray(request.params?.availableDecisions)
