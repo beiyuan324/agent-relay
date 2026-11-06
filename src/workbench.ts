@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { call, message, type Json, type RelayEvent } from "./api";
 import { referenceInput, type ComposerDraft } from "./mentions";
+import { isThreadApproval } from "./approvals";
 import type { CollaborationMode } from "./slash-commands";
 import { EMPTY_PROJECT_CATALOG, projectCatalog, type ProjectCatalog } from "./projects";
-import { applyEvent, mergeLive, mergeApprovals, pruneCache, retainedBytes, type ApprovalUpdate } from "./workbench-state";
+import { deviceKey as keyOf, applyEvent, mergeLive, mergeApprovals, pruneCache, retainedBytes, type ApprovalUpdate } from "./workbench-state";
 export { applyEvent } from "./workbench-state";
 
 export interface QueuedMessage {
@@ -17,7 +18,6 @@ export interface QueuedMessage {
   error?: string;
 }
 interface MessageQueue { items: QueuedMessage[]; paused?: string }
-const keyOf = (device: string, thread: string) => JSON.stringify([device, thread]);
 export function useWorkbench(device: string, available: boolean, onError: (error: string) => void, availableDevices?: ReadonlySet<string>) {
   const [threads, setThreads] = useState<Json[]>([]);
   const [archiveExpanded, setArchiveExpanded] = useState(false);
@@ -724,7 +724,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       const live = liveTurns.current[key];
       if (live?.status === "inProgress" || (!live && thread.status?.type === "active") || (thread.turns || []).some((turn: Json) => turn.status === "inProgress" && !(live && live.id === turn.id && live.status !== "inProgress"))) continue;
       if (pendingEvents.current.some(event => event.key === key)) continue;
-      if ((requests[target] || []).some(request => !request.params?.threadId || request.params.threadId === id)) continue;
+      if ((requests[target] || []).some(request => isThreadApproval(request, id))) continue;
       void submit(target, id, item);
       break;
     }
@@ -738,7 +738,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     if (commandLocks.current[key]) throw new Error(commandLocks.current[key]);
     const startsWork = method === "thread/compact/start" || method === "review/start";
     if ((startsWork || method === "thread/fork") && (queued.current[key]?.items.length || inFlight.current?.key === key || liveTurns.current[key]?.status === "inProgress" || thread.status?.type === "active" || (thread.turns || []).some((turn: Json) => turn.status === "inProgress"))) throw new Error("请等待当前回合结束并处理待发消息后执行此命令");
-    if (startsWork && (requests[target] || []).some(request => !request.params?.threadId || request.params.threadId === id)) throw new Error("请先处理当前会话的待办审批");
+    if (startsWork && (requests[target] || []).some(request => isThreadApproval(request, id))) throw new Error("请先处理当前会话的待办审批");
     const label = method === "thread/compact/start" ? "正在压缩上下文…" : method === "review/start" ? "正在审查代码…" : "正在执行命令…";
     const operation = crypto.randomUUID();
     commandTokens.current[key] = operation;

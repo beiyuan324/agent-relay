@@ -15,6 +15,14 @@ struct Candidate {
     source: &'static str,
 }
 
+pub(crate) fn codex_home() -> Result<PathBuf> {
+    let home = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|home| PathBuf::from(home).join(".codex")))
+        .ok_or_else(||anyhow!("无法确定 Codex 配置目录"))?;
+    ensure!(home.is_absolute(), "Codex 配置目录必须为绝对路径");
+    Ok(home)
+}
+
 pub fn discover(configured: &str) -> Result<PathBuf> {
     Ok(detect(configured)?.path)
 }

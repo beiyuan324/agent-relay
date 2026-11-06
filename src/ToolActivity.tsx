@@ -1,9 +1,7 @@
 import { AlertCircle, ChevronDown, FileCode2, Globe2, Image, Loader2, Terminal, Users, Wrench } from "lucide-react";
 import type { Json } from "./api";
+import { displayText as text } from "./message-text";
 
-function text(value: unknown): string {
-  return typeof value === "string" ? value : value == null ? "" : JSON.stringify(value, null, 2);
-}
 function commandText(item: Json): string {
   return Array.isArray(item.command) ? item.command.join(" ") : text(item.command);
 }
@@ -58,8 +56,12 @@ function toolArguments(item: Json): Json {
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Json : {};
   } catch { return {}; }
 }
-function toolName(item: Json): string {
+function toolDescription(item: Json): string | undefined {
   const args = toolArguments(item);
+  return [item.title, args.title, args.description].find(value => typeof value === "string" && value.trim())?.trim();
+}
+function toolName(item: Json): string {
+  const description = toolDescription(item);
   if (item.type === "webSearch") {
     const action = item.action || {};
     const queries = [item.query, ...(Array.isArray(action.queries) ? action.queries : []), action.query]
@@ -68,9 +70,7 @@ function toolName(item: Json): string {
     const label = action.type === "openPage" ? "打开网页" : action.type === "findInPage" ? "查找网页" : "搜索网页";
     return label + (detail ? " · " + detail : "");
   }
-  for (const candidate of [item.title, args.title, args.description]) {
-    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-  }
+  if (description) return description;
   if (item.type === "imageView") return "查看图片" + (typeof item.path === "string" ? " · " + item.path : "");
   if (item.type === "collabToolCall" || item.type === "collabAgentToolCall") return "协作 · " + (item.tool || "代理任务");
   if (item.type === "functionCallOutput") return "工具输出";
@@ -122,10 +122,9 @@ function activityCategory(item: Json): string {
 
 function runningActivityLabel(item: Json): string {
   if (item.type === "commandExecution") {
-    const args = toolArguments(item);
-    const description = [item.title, args.title, args.description].find(value => typeof value === "string" && value.trim());
+    const description = toolDescription(item);
     const command = shellCommand(item).trim().replace(/\s+/g, " ");
-    return description ? "正在" + description.trim() : "正在运行" + (command ? " " + command : "命令");
+    return description ? "正在" + description : "正在运行" + (command ? " " + command : "命令");
   }
   if (item.type === "fileChange") {
     const paths = (item.changes || []).map((change: Json) => change.path).filter((path: unknown): path is string => typeof path === "string" && !!path.trim());

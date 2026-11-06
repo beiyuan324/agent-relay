@@ -3,7 +3,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AlertCircle, Blocks, ChevronRight, FileCode2, ListChecks, Loader2, MessageSquare, X } from "lucide-react";
 import type { Json } from "./api";
-import { messageBody, messageLinks, referenceKind, type MessageReference } from "./message-text";
+import { displayText as output, messageBody, messageLinks, referenceKind, type MessageReference } from "./message-text";
 import { ToolActivity, ToolActivityGroup } from "./ToolActivity";
 export { Approval } from "./Approval";
 
@@ -26,9 +26,6 @@ function Markdown({ text }: { text: string }) {
   return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml
     urlTransform={url => referenceKind(url) ? url : defaultUrlTransform(url)}
     components={{ a: ({ children, href }) => <ReferenceLink href={href || ""} label={typeof children === "string" ? children : href || "引用"}>{children}</ReferenceLink> }}>{text}</ReactMarkdown></div>;
-}
-function output(value: unknown): string {
-  return typeof value === "string" ? value : value == null ? "" : JSON.stringify(value, null, 2);
 }
 function UserText({ part }: { part: Json }) {
   const text = part.text as string;

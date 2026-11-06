@@ -18,10 +18,7 @@ fn host_state<'a>(state: &'a Value, host: &str, key: &str) -> Option<&'a Value> 
 }
 
 pub fn read_desktop() -> Result<DesktopProjects> {
-    let home = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|home| PathBuf::from(home).join(".codex")))
-        .ok_or_else(|| anyhow!("无法确定 Codex 配置目录"))?;
-    ensure!(home.is_absolute(), "Codex 配置目录必须为绝对路径");
+    let home = crate::discovery::codex_home()?;
     let path = home.join(".codex-global-state.json");
     let file = match std::fs::File::open(&path) {
         Ok(file) => file,

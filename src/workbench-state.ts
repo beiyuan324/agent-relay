@@ -1,5 +1,7 @@
 import type { Json } from "./api";
 
+export const deviceKey = (device: string, id: string) => JSON.stringify([device, id]);
+
 export const CACHE_MAX_THREADS = 24;
 export const CACHE_MAX_BYTES = 48 * 1024 * 1024;
 
@@ -82,7 +84,6 @@ export function applyEvent(previous: Json, event: Json, receivedAt = Date.now())
     const item = { ...turn.items[itemIndex] };
     if (item.type === "agentMessage" && typeof p.phase === "string") item.phase = p.phase;
     if (method.includes("commandExecution")) item.aggregatedOutput = (item.aggregatedOutput || "") + (p.delta || "");
-    else if (method.includes("reasoning")) item.text = (item.text || "") + (p.delta || "");
     else item.text = (item.text || "") + (p.delta || "");
     turn.items[itemIndex] = item;
   } else if (method === "turn/plan/updated") { turn.plan = p.plan; turn.planExplanation = p.explanation; }

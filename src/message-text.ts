@@ -72,6 +72,10 @@ export function messageLinks(text: string): (string | MessageReference)[] {
   return parts;
 }
 
+export function displayText(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : JSON.stringify(value, null, 2);
+}
+
 export function messagePreview(text: string): string {
   return messageLinks(messageBody(text).text).map(part => typeof part === "string" ? part : part.label).join("").replace(/\s+/g, " ").trim();
 }
