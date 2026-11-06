@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { AlertCircle, Blocks, ChevronRight, FileCode2, ListChecks, Loader2, MessageSquare, X } from "lucide-react";
 import type { Json } from "./api";
 import { displayText as output, messageBody, messageLinks, referenceKind, type MessageReference } from "./message-text";
-import { ToolActivity, ToolActivityGroup } from "./ToolActivity";
+import { ToolActivityGroup } from "./ToolActivity";
 export { Approval } from "./Approval";
 
 const PlanContext = createContext<((plan: string) => void) | undefined>(undefined);
@@ -70,20 +70,14 @@ const Item = memo(function Item({ item, active = false }: { item: Json; active?:
       return <section className="message plan-message" aria-label="Codex 计划"><div className="message-label"><ListChecks size={15} />计划</div><Markdown text={typeof item.text === "string" ? item.text : ""} />{!active && item.text?.trim() && implementPlan && <div className="plan-actions"><button type="button" className="primary small" onClick={() => implementPlan(item.text)}>实施此计划</button></div>}</section>;
     case "contextCompaction":
       return <div className="command-transcript-note" role="status">{active ? "正在压缩会话上下文…" : "会话上下文已压缩"}</div>;
-    case "enteredReviewMode":
-      return <div className="command-transcript-note">开始代码审查{item.review ? " · " + item.review : ""}</div>;
     case "exitedReviewMode":
       return <section className="message agent-message"><div className="message-label">代码审查结果</div><Markdown text={item.review || "审查已结束。"} /></section>;
-    case "reasoning":
-      return null;
-    default:
-      return <ToolActivity item={item} active={active} />;
   }
 });
 function ProcessItems({ items, active }: { items: Json[]; active: boolean }) {
   const groups: { tools: boolean; items: Json[]; key: string }[] = [];
   for (const [index, item] of items.entries()) {
-    const tools = !["userMessage", "agentMessage", "plan", "reasoning"].includes(item.type);
+    const tools = item.type !== "agentMessage";
     const previous = groups[groups.length - 1];
     if (tools && previous?.tools) previous.items.push(item);
     else groups.push({ tools, items: [item], key: `${tools ? "tools" : "item"}:${item.id ?? index}` });
