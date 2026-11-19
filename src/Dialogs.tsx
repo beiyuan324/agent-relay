@@ -1,16 +1,17 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useFocusScope } from "./ui";
 import { UpdateSettings } from "./UpdateSettings";
+import { MobileSettings } from "./MobileSettings";
 import type { Updates } from "./updates";
 import type { CodexProject } from "./projects";
 import { version as appVersion } from "../package.json";
 import { open as pickFile } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Check, CheckCircle2, Copy, Globe2, Loader2, ShieldCheck, Wifi, X } from "lucide-react";
-import { command, desktop, message, stateLabels, type Device, type Json, type Snapshot } from "./api";
+import { android, command, mobileAction, native, message, stateLabels, type Device, type Json, type Snapshot } from "./api";
 
 export async function copy(text: string) {
-  if (desktop) await writeText(text);
+  if (native) await writeText(text);
   else await navigator.clipboard.writeText(text);
 }
 export function Modal({ title, subtitle, close, children, footer, initialFocus, wide = false }: {
@@ -29,16 +30,26 @@ export function Modal({ title, subtitle, close, children, footer, initialFocus, 
   </div>;
 }
 
-export function PairDialog({ snapshot, close, changed }: { snapshot: Snapshot | null; close: () => void; changed: (id?: string) => Promise<void> }) {
-  const [tab, setTab] = useState<"invite" | "join">("invite");
+export function PairDialog({ snapshot, close, changed, initialUri = "" }: { snapshot: Snapshot | null; close: () => void; changed: (id?: string) => Promise<void>; initialUri?: string }) {
+  const [tab, setTab] = useState<"invite" | "join">(android || initialUri ? "join" : "invite");
   const [mode, setMode] = useState<"lan" | "relay">("lan");
   const [address, setAddress] = useState(snapshot?.addresses[0]?.url || "");
   const [relay, setRelay] = useState(snapshot?.settings.relayUrl || "");
-  const [uri, setUri] = useState("");
+  const [uri, setUri] = useState(initialUri);
   const [created, setCreated] = useState<Json | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!android || tab !== "invite" || mode !== "lan") return;
+    let stopped = false;
+    void mobileAction<boolean>("lan").then(async allowed => {
+      if (!allowed) throw new Error("允许局域网访问后才能创建直连邀请");
+      const value = await command<Snapshot>("snapshot");
+      if (!stopped && value.addresses[0]) setAddress(previous => previous || value.addresses[0].url);
+    }).catch(error => { if (!stopped) setError(message(error)); });
+    return () => { stopped = true; };
+  }, [tab, mode]);
   const invite = async () => {
     setBusy(true); setError("");
     try { const result = await command<Json>("create_invitation", { endpoint: mode === "lan" ? address : relay, mode }); setCreated(result); await changed(); }
@@ -51,9 +62,9 @@ export function PairDialog({ snapshot, close, changed }: { snapshot: Snapshot | 
     catch (error) { setError(message(error)); }
     finally { setBusy(false); }
   };
-  return <Modal title="添加设备" close={close} footer={tab === "invite" ? created ? <button className="primary full" onClick={() => { void copy(created.uri).then(() => setCopied(true)).catch(error => setError(message(error))); }}>{copied ? <Check size={15} /> : <Copy size={15} />}{copied ? "已复制链接" : "复制配对链接"}</button> : <button className="primary full" disabled={busy || !(mode === "lan" ? address.trim() : relay.trim())} onClick={() => void invite()}>{busy && <Loader2 className="spin" size={15} />}创建配对链接</button> : <button className="primary full" disabled={busy || !uri.trim()} onClick={() => void join()}>{busy && <Loader2 size={15} className="spin" />}连接设备</button>}>
+  return <Modal title="添加设备" close={close} footer={tab === "invite" ? created ? <><button className="primary full" onClick={() => { void copy(created.uri).then(() => setCopied(true)).catch(error => setError(message(error))); }}>{copied ? <Check size={15} /> : <Copy size={15} />}{copied ? "已复制链接" : "复制配对链接"}</button>{android && <button className="secondary full" onClick={() => { void mobileAction("share", { text: created.uri }).catch(error => setError(message(error))); }}>分享邀请</button>}</> : <button className="primary full" disabled={busy || !(mode === "lan" ? address.trim() : relay.trim())} onClick={() => void invite()}>{busy && <Loader2 className="spin" size={15} />}创建配对链接</button> : <button className="primary full" disabled={busy || !uri.trim()} onClick={() => void join()}>{busy && <Loader2 size={15} className="spin" />}连接设备</button>}>
     <div className="segmented"><button className={tab === "invite" ? "active" : ""} disabled={busy} onClick={() => { setTab("invite"); setError(""); }}>创建邀请</button><button className={tab === "join" ? "active" : ""} disabled={busy} onClick={() => { setTab("join"); setError(""); }}>加入设备</button></div>
-    {tab === "invite" ? created ? <div className="form-group"><label htmlFor="invite-uri">配对链接</label><textarea id="invite-uri" className="invite-uri" readOnly value={created.uri} /><div className="hint"><ShieldCheck size={15} />链接包含配对密钥，请仅交给你要连接的电脑。</div></div> : <><div className="connection-choices" role="group" aria-label="连接方式"><button aria-pressed={mode === "lan"} className={mode === "lan" ? "chosen" : ""} onClick={() => setMode("lan")}><Wifi size={21} /><strong>同一网络</strong></button><button aria-pressed={mode === "relay"} className={mode === "relay" ? "chosen" : ""} onClick={() => setMode("relay")}><Globe2 size={21} /><strong>异地连接</strong></button></div>{mode === "lan" ? <div className="form-group"><label htmlFor="lan-address">这台电脑的地址</label>{!!snapshot?.addresses.length && <select value={snapshot.addresses.some(a => a.url === address) ? address : ""} onChange={event => setAddress(event.target.value)} aria-label="选择网卡"><option value="">手动输入地址</option>{snapshot.addresses.map(a => <option key={a.url} value={a.url}>{a.name} · {a.url}</option>)}</select>}<input id="lan-address" title={address} value={address} placeholder="ws://192.168.1.10:47321" onChange={event => setAddress(event.target.value)} />{snapshot?.listenerError && <p className="error-text">{snapshot.listenerError}</p>}</div> : <div className="form-group"><label htmlFor="relay-address">Workers 中继地址</label><input id="relay-address" title={relay} value={relay} placeholder="https://your-relay.workers.dev" onChange={event => setRelay(event.target.value)} /></div>}</> : <><div className="form-group"><label htmlFor="join-uri">另一台电脑的配对链接</label><textarea id="join-uri" value={uri} placeholder="relay://connect?…" rows={4} autoComplete="off" spellCheck={false} onChange={event => setUri(event.target.value)} /></div></>}
+    {tab === "invite" ? created ? <div className="form-group"><label htmlFor="invite-uri">配对链接</label><textarea id="invite-uri" className="invite-uri" readOnly value={created.uri} /><div className="hint"><ShieldCheck size={15} />链接包含配对密钥，请仅交给你要连接的电脑。</div></div> : <><div className="connection-choices" role="group" aria-label="连接方式"><button aria-pressed={mode === "lan"} className={mode === "lan" ? "chosen" : ""} onClick={() => setMode("lan")}><Wifi size={21} /><strong>同一网络</strong></button><button aria-pressed={mode === "relay"} className={mode === "relay" ? "chosen" : ""} onClick={() => setMode("relay")}><Globe2 size={21} /><strong>异地连接</strong></button></div>{mode === "lan" ? <div className="form-group"><label htmlFor="lan-address">{android ? "此设备的地址" : "这台电脑的地址"}</label>{!!snapshot?.addresses.length && <select value={snapshot.addresses.some(a => a.url === address) ? address : ""} onChange={event => setAddress(event.target.value)} aria-label="选择网卡"><option value="">手动输入地址</option>{snapshot.addresses.map(a => <option key={a.url} value={a.url}>{a.name} · {a.url}</option>)}</select>}<input id="lan-address" title={address} value={address} placeholder="ws://192.168.1.10:47321" onChange={event => setAddress(event.target.value)} />{snapshot?.listenerError && <p className="error-text">{snapshot.listenerError}</p>}</div> : <div className="form-group"><label htmlFor="relay-address">Workers 中继地址</label><input id="relay-address" title={relay} value={relay} placeholder="https://your-relay.workers.dev" onChange={event => setRelay(event.target.value)} /></div>}</> : <><div className="form-group"><label htmlFor="join-uri">另一台电脑的配对链接</label><textarea id="join-uri" value={uri} placeholder="relay://connect?…" rows={4} autoComplete="off" spellCheck={false} onChange={event => setUri(event.target.value)} /></div></>}
     {error && <p className="error-text" role="alert">{error}</p>}
   </Modal>;
 }
@@ -78,7 +89,7 @@ export function DeviceDialog({ device, close, changed }: { device: Device; close
     </div>
     {!device.peer && !device.error && <p className="hint">{device.state === "waiting" ? "请在另一台电脑打开 Relay，选择“加入设备”并粘贴配对链接。" : device.state === "handshaking" ? "正在验证设备身份…" : "正在连接…"}</p>}
     {device.error && <p className="error-text">{device.error}</p>}
-    {!device.approved && device.peer && <div className="trust-prompt"><ShieldCheck size={20} /><p>确认后，在双方启用共享期间，这台设备可以查看、继续和操作你当前用户的全部 Codex 项目与会话。</p></div>}
+    {!device.approved && device.peer && <div className="trust-prompt"><ShieldCheck size={20} /><p>{android ? "核对电脑的名称和设备标识。双方确认后，你可以在手机上操作这台电脑共享的 Codex 项目与会话。" : "确认后，在双方启用共享期间，这台设备可以查看、继续和操作你当前用户的全部 Codex 项目与会话。"}</p></div>}
     {device.approved && !device.peerApproved && <p className="hint"><CheckCircle2 size={15} />本机已确认，请在另一台电脑上确认此配对。</p>}
     {error && <p className="error-text" role="alert">{error}</p>}
   </Modal>;
@@ -97,7 +108,7 @@ export function SettingsDialog({ snapshot, updates, close, changed }: { snapshot
   const detectionGeneration = useRef(0);
   useEffect(() => () => { detectionGeneration.current++; }, []);
   useEffect(() => {
-    if (!desktop || snapshot?.settings.codexPath) return;
+    if (!native || android || snapshot?.settings.codexPath) return;
     let stopped = false;
     setDetecting(true);
     void command<{ path: string; source: string }>("detect_codex")
@@ -126,8 +137,9 @@ export function SettingsDialog({ snapshot, updates, close, changed }: { snapshot
     finally { setBusy(false); }
   };
   return <Modal title="设置" close={close} wide initialFocus={nameInput} footer={<div className="dialog-footer"><button className="primary" disabled={busy || detecting || !name.trim()} onClick={() => void save()}>{busy ? "正在保存…" : "完成"}</button></div>}>
-    <div className="form-section-label">这台电脑</div><div className="settings-group"><label className="setting-field">设备名称<input ref={nameInput} value={name} maxLength={80} onChange={event => setName(event.target.value)} /></label><label className="setting-field">外观<select value={theme} onChange={event => setTheme(event.target.value as typeof theme)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label></div>
-    <div className="form-section-label">Codex</div><div className="settings-group"><label className="setting-field vertical">可执行文件<div className="input-with-button"><input value={path} title={path || installation?.path} disabled={detecting || busy} placeholder="自动检测" onChange={event => { setPath(event.target.value); setInstallation(null); setDetectionError(""); }} /><button className="secondary small" disabled={detecting || busy || !desktop} onClick={() => { void pickFile({ multiple: false, directory: false, title: "选择 Codex 可执行文件" }).then(value => { if (typeof value === "string") { setPath(value); setInstallation(null); setDetectionError(""); } }).catch(error => setError(message(error))); }}>选择…</button></div></label><div className="codex-detection"><div className="codex-detection-result" aria-live="polite">{detecting ? <span className="muted"><Loader2 className="spin" size={13} />正在查找 Codex…</span> : installation && !path ? <><span className="codex-found"><CheckCircle2 size={13} />已找到 · {installation.source}</span><code title={installation.path}>{installation.path}</code></> : <span className="muted">{path ? "自定义路径" : desktop ? "自动检测" : "桌面预览"}</span>}</div><button className="secondary small" disabled={detecting || busy || !desktop} onClick={() => void detect()}>自动检测</button></div>{detectionError && <p className="group-note error-text" role="status">{detectionError}</p>}<p className="group-note">更改路径前请先停止运行中的回合。</p></div>
+    <div className="form-section-label">{android ? "此设备" : "这台电脑"}</div><div className="settings-group"><label className="setting-field">设备名称<input ref={nameInput} value={name} maxLength={80} onChange={event => setName(event.target.value)} /></label><label className="setting-field">外观<select value={theme} onChange={event => setTheme(event.target.value as typeof theme)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label></div>
+    {!android && <><div className="form-section-label">Codex</div><div className="settings-group"><label className="setting-field vertical">可执行文件<div className="input-with-button"><input value={path} title={path || installation?.path} disabled={detecting || busy} placeholder="自动检测" onChange={event => { setPath(event.target.value); setInstallation(null); setDetectionError(""); }} /><button className="secondary small" disabled={detecting || busy || !native} onClick={() => { void pickFile({ multiple: false, directory: false, title: "选择 Codex 可执行文件" }).then(value => { if (typeof value === "string") { setPath(value); setInstallation(null); setDetectionError(""); } }).catch(error => setError(message(error))); }}>选择…</button></div></label><div className="codex-detection"><div className="codex-detection-result" aria-live="polite">{detecting ? <span className="muted"><Loader2 className="spin" size={13} />正在查找 Codex…</span> : installation && !path ? <><span className="codex-found"><CheckCircle2 size={13} />已找到 · {installation.source}</span><code title={installation.path}>{installation.path}</code></> : <span className="muted">{path ? "自定义路径" : native ? "自动检测" : "桌面预览"}</span>}</div><button className="secondary small" disabled={detecting || busy || !native} onClick={() => void detect()}>自动检测</button></div>{detectionError && <p className="group-note error-text" role="status">{detectionError}</p>}<p className="group-note">更改路径前请先停止运行中的回合。</p></div></>}
+    {android && <MobileSettings />}
     <UpdateSettings updates={updates} />
     <div className="form-section-label">连接</div><div className="settings-group"><label className="setting-field vertical">默认 Workers 中继地址<input value={relay} title={relay} placeholder="https://your-relay.workers.dev" onChange={event => setRelay(event.target.value)} /></label><div className="info-row"><span>局域网端口</span><span className="info-value mono">{snapshot?.settings.listenPort || 47321}</span></div></div>
     {error && <p className="error-text" role="alert">{error}</p>}

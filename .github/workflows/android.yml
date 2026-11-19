@@ -1,0 +1,80 @@
+name: Build Android
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RELAY_ANDROID_KEYSTORE: ${{ github.workspace }}/../relay-android-release.jks
+      RELAY_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      RELAY_ANDROID_KEY_ALIAS: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: android-actions/setup-android@v3
+      - name: Install Android toolchain
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+      - name: Prepare release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64" && test -n "$RELAY_ANDROID_STORE_PASSWORD" || { echo "Missing Android signing secrets"; exit 1; }
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RELAY_ANDROID_KEYSTORE"
+          chmod 600 "$RELAY_ANDROID_KEYSTORE"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=--remap-path-prefix=$HOME=/build/user --remap-path-prefix=$GITHUB_WORKSPACE=/build/agent-relay" >> "$GITHUB_ENV"
+      - run: npm ci
+      - name: Regression tests
+        run: |
+          npm test
+          cargo test -p relay-core --lib --locked
+      - name: Build signed APK
+        run: |
+          chmod +x src-tauri/gen/android/gradlew
+          npm run tauri -- android build --target aarch64 --apk --ci
+      - name: Collect APK and update metadata
+        run: |
+          mkdir -p android-artifacts
+          RELAY_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")
+          export RELAY_VERSION
+          cp src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk "android-artifacts/Relay_${RELAY_VERSION}_arm64.apk"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          version = os.environ["RELAY_VERSION"]
+          apk = pathlib.Path(f"android-artifacts/Relay_{version}_arm64.apk")
+          digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+          parts = [int(part) for part in version.split(".")]
+          code = parts[0] * 1_000_000 + parts[1] * 1_000 + parts[2]
+          manifest = {"appId": "app.agentrelay.mobile", "version": version, "versionCode": code, "url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/v{version}/{apk.name}", "sha256": digest, "notes": ""}
+          apk.with_name("android-latest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          apk.with_name("SHA256SUMS-android.txt").write_text(f"{digest}  {apk.name}\n", encoding="utf-8")
+          PY
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs android-artifacts/*.apk
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 android-artifacts/*.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Relay-Android-arm64
+          path: android-artifacts/*
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$RELAY_ANDROID_KEYSTORE"

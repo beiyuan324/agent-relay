@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { call, message, type Json, type RelayEvent } from "./api";
+import { call, command, native, subscribeQueue, message, type Json, type RelayEvent } from "./api";
 import { referenceInput, type ComposerDraft } from "./mentions";
 import { isThreadApproval } from "./approvals";
 import type { CollaborationMode } from "./slash-commands";
@@ -38,6 +38,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const [sessions, setSessions] = useState<Record<string, { ready: boolean; resumeError?: string; historyError?: string }>>({});
   const resumed = useRef(new Set<string>());
   const newThreads = useRef<Record<string, Json>>({});
+  const createdIds = useRef<Record<string, string>>({});
   const listed = useRef(threads); listed.current = threads;
   const [models, setModels] = useState<Json[]>([]);
   const [environment, setEnvironment] = useState<Json | null>(null);
@@ -57,7 +58,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [opening, setOpening] = useState(false);
-  const [sending, setSending] = useState(false);
+
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [environmentRevision, setEnvironmentRevision] = useState(0);
   const [projectRevision, setProjectRevision] = useState(0);
@@ -95,6 +96,8 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     setQueues(queued.current);
   }, []);
   const pauseQueue = useCallback((key: string, reason: string) => {
+    if (!queued.current[key]?.items.length) return;
+    void command("queue_pause", { key, reason }).catch(error => onErrorRef.current(message(error)));
     updateQueues(previous => !previous[key]?.items.length || previous[key].paused === reason ? previous : {
       ...previous, [key]: { ...previous[key], paused: reason },
     });
@@ -210,16 +213,17 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     try {
       const result = await call(target, "thread/list", { cursor, limit: 40, sortKey: "updated_at", archived, ...(term ? { searchTerm: term } : {}) });
       if (!current()) return;
-      const data: Json[] = (result.data || [])
-        .filter((thread: Json) => archived || newThreads.current[keyOf(target, thread.id)]?.relayHistoryPending !== true)
-        .map((thread: Json) => ({ ...thread, relayArchived: archived }));
+      const data: Json[] = (result.data || []).map((thread: Json) => ({ ...thread, relayArchived: archived }));
       for (const thread of data) {
         archiveFlags.current[keyOf(target, thread.id)] = archived;
-        if (!archived) delete newThreads.current[keyOf(target, thread.id)];
+        if (!archived) {
+          materializeThread(target, thread.id);
+          delete newThreads.current[keyOf(target, thread.id)];
+        }
       }
       const query = term.toLocaleLowerCase();
       const pending = archived ? [] : Object.entries(newThreads.current)
-        .filter(([key, thread]) => JSON.parse(key)[0] === target && thread.relayHistoryPending === false && (!query || [thread.name, thread.preview, thread.cwd].some(value => typeof value === "string" && value.toLocaleLowerCase().includes(query))))
+        .filter(([key, thread]) => JSON.parse(key)[0] === target && (thread.relayHistoryPending === false || thread.relayDraft) && (!query || [thread.name, thread.preview, thread.cwd].some(value => typeof value === "string" && value.toLocaleLowerCase().includes(query))))
         .map(([, thread]) => thread);
       rows(previous => {
         const listed = cursor ? [...previous, ...data.filter(thread => !previous.some(row => row.id === thread.id))] : data;
@@ -241,7 +245,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
       const restore = selection.current[device];
       active.current = { ...active.current, selected: restore?.id || null, archiveExpanded: false };
       setArchiveExpanded(false);
-      setThreads(Object.entries(newThreads.current).filter(([key, thread]) => JSON.parse(key)[0] === device && thread.relayHistoryPending === false).map(([, thread]) => thread)); setSelected(restore?.id || null); setEnvironment(null); setModels([]); setPermissions(null); setSearch(""); setNextCursor(null); setOlderCursor(null); setSending(false);
+      setThreads(Object.entries(newThreads.current).filter(([key, thread]) => JSON.parse(key)[0] === device && (thread.relayHistoryPending === false || thread.relayDraft)).map(([, thread]) => thread)); setSelected(restore?.id || null); setEnvironment(null); setModels([]); setPermissions(null); setSearch(""); setNextCursor(null); setOlderCursor(null);
       setArchivedThreads([]); setArchivedNextCursor(null); setArchivedError("");
     }
     ++listEpoch.current; ++archivedListEpoch.current; ++openEpoch.current;
@@ -302,6 +306,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
   const open = useCallback(async (id: string, archivedHint?: boolean, options: { preserveHistory?: boolean } = {}) => {
     const target = active.current.device;
     if (!active.current.available) return;
+    id = createdIds.current[keyOf(target, id)] || id;
     flushEvents();
     const key = keyOf(target, id);
     if (archiveMutations.current.has(key)) return;
@@ -440,14 +445,15 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     setListRevision(previous => previous + 1);
   }, [pauseQueue]);
 
-  const materializeThread = useCallback((target: string, id: string) => {
+  function materializeThread(target: string, id: string) {
     const key = keyOf(target, id);
     const pending = newThreads.current[key];
-    if (!pending || pending.relayDraft || archiveFlags.current[key] === true) return;
+    if (!pending || pending.relayHistoryPending !== true || pending.relayDraft || archiveFlags.current[key] === true) return;
     const thread = { ...pending, relayHistoryPending: false };
     newThreads.current[key] = thread;
+    setCache(previous => previous[key] ? { ...previous, [key]: { ...previous[key], relayHistoryPending: false } } : previous);
     if (target === active.current.device) setThreads(previous => [thread, ...previous.filter(row => row.id !== id)]);
-  }, []);
+  }
 
   const event = useCallback((event: RelayEvent) => {
     if (event.type !== "codex" || typeof event.device !== "string" || typeof event.message !== "object") return;
@@ -609,126 +615,92 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     setPermissions({ model });
     setSessions(previous => ({ ...previous, [key]: { ready: true } }));
   };
-  const submit = useCallback(async (target: string, selectedId: string, item: QueuedMessage) => {
-    if (sendingRef.current || queued.current[keyOf(target, selectedId)]?.items[0]?.id !== item.id || queued.current[keyOf(target, selectedId)]?.items[0]?.status !== "queued") return;
-    let id = selectedId;
-    const { draft, model, effort, collaborationMode, serviceTier } = item;
-    const flight = { key: keyOf(target, id) };
-    inFlight.current = flight;
-    sendingRef.current = true; setSending(true);
-    updateQueues(previous => ({ ...previous, [flight.key]: { ...previous[flight.key], items: previous[flight.key].items.map(row => row.id === item.id ? { ...row, status: "sending" } : row) } }));
-    const submittedAt = Date.now();
-    const submittedSequence = sequence.current;
-    const generation = processEpoch.current[target] || 0;
-    try {
-      const draftKey = keyOf(target, id);
-      const pendingDraft = newThreads.current[draftKey];
-      if (pendingDraft?.relayDraft) {
-        const created = await call(target, "thread/start", { cwd: pendingDraft.cwd, ...(model ? { model } : {}), ...(pendingDraft.projectId ? { projectId: pendingDraft.projectId } : {}) });
-        if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，请重新发送消息");
-        if (!created.thread?.id) throw new Error("Codex 返回了无效的会话数据");
-        id = created.thread.id as string;
-        const key = keyOf(target, id);
-        const thread = { ...pendingDraft, ...created.thread, relayMode: cached.current[draftKey]?.relayMode ?? collaborationMode, relayServiceTier: cached.current[draftKey]?.relayServiceTier ?? serviceTier, preview: created.thread.preview || draft.text.trim(), relayDraft: false, relayDraftId: pendingDraft.relayDraftId, relayHistoryPending: true };
-        newThreads.current[key] = thread;
-        delete newThreads.current[draftKey];
-        resumed.current.delete(draftKey);
-        resumed.current.add(key);
-        flight.key = key;
-        updateQueues(previous => {
-          const next = { ...previous, [key]: previous[draftKey] };
-          delete next[draftKey];
-          return next;
-        });
-        if (selection.current[target]?.id === selectedId) selection.current[target] = { id, archived: false };
-        if (target === active.current.device && active.current.selected === selectedId) {
-          ++openEpoch.current;
-          active.current = { ...active.current, selected: id };
-          setSelected(id); setOpening(false);
-          setPermissions({ approvalPolicy: created.approvalPolicy, sandbox: created.sandbox, model: created.model, reasoningEffort: created.reasoningEffort });
-        }
-        setCache(previous => {
-          const next = { ...previous, [key]: thread };
-          delete next[draftKey];
-          return next;
-        });
-        setSessions(previous => {
-          const next = { ...previous, [key]: { ready: true } };
-          delete next[draftKey];
-          return next;
-        });
+  const queueRevision = useRef(-1);
+  const restored = useRef(false);
+  const migrated = useRef(new Set<string>());
+  const [restoredDrafts, setRestoredDrafts] = useState<Record<string, ComposerDraft> | null>(null);
+  const applyQueueSnapshot = useCallback((snapshot: Json) => {
+    if (snapshot.revision < queueRevision.current) return;
+    queueRevision.current = snapshot.revision;
+    queued.current = snapshot.queues || {};
+    setQueues(queued.current);
+    const flight = Object.entries(queued.current).find(([, queue]) => queue.items.some(item => item.status === "sending"));
+    inFlight.current = flight ? { key: flight[0] } : null;
+    sendingRef.current = !!flight;
+    if (!restored.current) {
+      restored.current = true; setRestoredDrafts(snapshot.drafts || {});
+      const draftThreads: Record<string, Json> = { ...snapshot.draftThreads };
+      for (const [key, queue] of Object.entries(snapshot.queues || {})) {
+        const thread = (queue as Json).thread;
+        if (thread?.relayDraft) draftThreads[key] = thread;
       }
-      if (!connected.current.has(target) || generation !== (processEpoch.current[target] || 0) || !resumed.current.has(keyOf(target, id))) throw new Error("连接或会话状态已变化，请重新接续后发送");
-      const result = await call(target, "turn/start", {
-        threadId: id, input: referenceInput(draft),
-        ...(model ? { model } : {}), ...(effort ? { effort } : {}),
-        ...(collaborationMode ? { collaborationMode: { mode: collaborationMode, settings: { model, reasoning_effort: effort || null, developer_instructions: null } } } : {}),
-        ...(serviceTier ? { serviceTier } : {}),
-      });
-      if (generation !== (processEpoch.current[target] || 0)) throw new Error("Codex 进程已退出，请重新读取会话确认提交状态");
-      const key = keyOf(target, id);
-      if (!result.turn?.id) throw new Error("未收到回合确认，请查看会话后重试或移除此消息");
-      const observed = liveTurns.current[key];
-      // A completion notification (or a newer turn) can arrive before this reply.
-      if (!observed || observed.sequence <= submittedSequence || (observed.id === result.turn.id && observed.status === "inProgress")) {
-        liveTurns.current[key] = { id: result.turn.id, status: result.turn.status || "inProgress", sequence: observed?.id === result.turn.id ? observed.sequence : submittedSequence };
+      const pending = Object.entries(draftThreads).filter(([, thread]) => thread.relayDraft);
+      for (const [key, thread] of pending) newThreads.current[key] = thread;
+      if (pending.length) {
+        setCache(previous => ({ ...Object.fromEntries(pending), ...previous }));
+        setListRevision(previous => previous + 1);
       }
-      if (result.turn?.id) {
-        if (newThreads.current[key] && !newThreads.current[key].preview) newThreads.current[key].preview = draft.text.trim();
-        materializeThread(target, id);
-      }
-      if (result.turn) setCache(previous => {
-        const thread = previous[key]; if (!thread) return previous;
-        const existing = (thread.turns || []).find((turn: Json) => turn.id === result.turn.id);
-        const timing = { startedAtMs: submittedAt, ...existing?.relayTiming };
-        const turns = existing
-          ? thread.turns.map((turn: Json) => turn.id === result.turn.id ? { ...result.turn, ...turn, status: turn.status !== "inProgress" ? turn.status : result.turn.status || turn.status, relayTiming: timing } : turn)
-          : [...(thread.turns || []), { ...result.turn, relayTiming: timing }];
-        return { ...previous, [key]: { ...thread, turns } };
-      });
-      if (["failed", "interrupted"].includes(liveTurns.current[key]?.status || "")) pauseQueue(key, "当前回合未正常完成，队列已暂停");
-      updateQueues(previous => !previous[flight.key] ? previous : ({
-        ...previous, [flight.key]: { ...previous[flight.key], items: previous[flight.key].items.filter(row => row.id !== item.id) },
-      }));
-    } catch (error) {
-      const detail = message(error);
-      updateQueues(previous => !previous[flight.key] ? previous : ({
-        ...previous, [flight.key]: { ...previous[flight.key], paused: "发送未完成，请查看会话后重试或移除此消息", items: previous[flight.key].items.map(row => row.id === item.id ? { ...row, status: "failed", error: detail } : row) },
-      }));
-      onErrorRef.current(detail);
-    } finally {
-      inFlight.current = null;
-      sendingRef.current = false;
-      setSending(false);
     }
-  }, [materializeThread, pauseQueue, setCache, updateQueues]);
-
-  const send = async (draft: ComposerDraft, model: string, effort: string, collaborationMode?: CollaborationMode, serviceTier?: string): Promise<boolean> => {
+    for (const [draftKey, value] of Object.entries(snapshot.created || {})) {
+      const created = value as Json, target = created.device as string;
+      const id = created.thread.id as string, key = keyOf(target, id);
+      createdIds.current[draftKey] = id;
+      if (migrated.current.has(draftKey)) {
+        if (created.thread.relayHistoryPending === false) materializeThread(target, id);
+        continue;
+      }
+      migrated.current.add(draftKey);
+      const pending = newThreads.current[draftKey];
+      const thread = { ...pending, ...created.thread, relayMode: cached.current[draftKey]?.relayMode, relayServiceTier: cached.current[draftKey]?.relayServiceTier, turns: cached.current[draftKey]?.turns || [] };
+      if (thread.relayHistoryPending) newThreads.current[key] = thread;
+      delete newThreads.current[draftKey];
+      resumed.current.delete(draftKey); resumed.current.add(key);
+      if (selection.current[target]?.id === created.from) selection.current[target] = { id, archived: false };
+      if (active.current.device === target && active.current.selected === created.from) {
+        ++openEpoch.current; active.current = { ...active.current, selected: id };
+        setSelected(id); setOpening(false);
+        const result = created.response;
+        setPermissions({ approvalPolicy: result.approvalPolicy, sandbox: result.sandbox, model: result.model, reasoningEffort: result.reasoningEffort });
+      }
+      setCache(previous => { const next = { ...previous, [key]: previous[key] || thread }; delete next[draftKey]; return next; });
+      setSessions(previous => { const next = { ...previous, [key]: { ready: true } }; delete next[draftKey]; return next; });
+      if (thread.relayHistoryPending === false && target === active.current.device) setListRevision(previous => previous + 1);
+    }
+  }, [setCache]);
+  const applyQueueRef = useRef(applyQueueSnapshot); applyQueueRef.current = applyQueueSnapshot;
+  useEffect(() => {
+    if (!native) return;
+    let stopped = false;
+    let dispose: (() => void) | undefined;
+    const refresh = () => { void command<Json>("workbench_snapshot").then(snapshot => { if (!stopped) applyQueueRef.current(snapshot); }).catch(error => { if (!stopped) onErrorRef.current(message(error)); }); };
+    void subscribeQueue(snapshot => { if (!stopped) applyQueueRef.current(snapshot); }).then(unlisten => {
+      if (stopped) unlisten(); else { dispose = unlisten; refresh(); }
+    }).catch(error => onErrorRef.current(message(error)));
+    const visible = () => { if (document.visibilityState === "visible") refresh(); };
+    window.addEventListener("focus", refresh); document.addEventListener("visibilitychange", visible);
+    return () => { stopped = true; dispose?.(); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", visible); };
+  }, []);
+  const pendingEnqueues = useRef(new Set<string>());
+  const send = async (draft: ComposerDraft, model: string, effort: string, collaborationMode?: CollaborationMode, serviceTier?: string, draftWrite?: { before: Promise<void>; transition: { key: string; expected: ComposerDraft; next: ComposerDraft } }): Promise<boolean> => {
     const { device: target, selected: id, available } = active.current;
     if (!id || !available || !resumed.current.has(keyOf(target, id)) || archiveFlags.current[keyOf(target, id)] === true || archiveMutations.current.has(keyOf(target, id)) || !draft.text.trim()) return false;
     const key = keyOf(target, id);
     if (commandLocks.current[key]) { onErrorRef.current(commandLocks.current[key]); return false; }
     if (collaborationMode && !model) { onErrorRef.current("请选择模型后再使用协作模式"); return false; }
-    const item: QueuedMessage = { id: crypto.randomUUID(), draft: { text: draft.text, mentions: draft.mentions.map(mention => ({ ...mention })) }, model, effort, collaborationMode, serviceTier, status: "queued" };
-    updateQueues(previous => ({ ...previous, [key]: { ...previous[key], items: [...(previous[key]?.items || []), item] } }));
-    return true;
+    const source = cached.current[key];
+    const draftKey = keyOf(target, source.relayDraftId || id);
+    if (pendingEnqueues.current.has(draftKey)) return false;
+    pendingEnqueues.current.add(draftKey);
+    try {
+      const thread = { id: source.id, cwd: source.cwd, projectId: source.projectId, relayDraft: source.relayDraft, relayDraftId: source.relayDraftId, relayModel: source.relayModel, relayHistoryPending: source.relayHistoryPending };
+      if (draftWrite) await draftWrite.before;
+      const snapshot = await command<Json>("queue_enqueue", { device: target, thread, draft: draftWrite?.transition, item: {
+        id: crypto.randomUUID(), draft, input: referenceInput(draft), model, effort, collaborationMode, serviceTier, status: "queued",
+      } });
+      applyQueueSnapshot(snapshot); return true;
+    } catch (error) { onErrorRef.current(message(error)); return false; }
+    finally { pendingEnqueues.current.delete(draftKey); }
   };
-
-  useEffect(() => {
-    if (sendingRef.current) return;
-    for (const [key, queue] of Object.entries(queues)) {
-      const [target, id] = JSON.parse(key) as [string, string];
-      const item = queue.items[0], thread = cache[key];
-      if (commandLocks.current[key]) continue;
-      if (!item || item.status !== "queued" || queue.paused || !connected.current.has(target) || !resumed.current.has(key) || !thread || thread.relayArchived || archiveFlags.current[key] || archiveMutations.current.has(key)) continue;
-      const live = liveTurns.current[key];
-      if (live?.status === "inProgress" || (!live && thread.status?.type === "active") || (thread.turns || []).some((turn: Json) => turn.status === "inProgress" && !(live && live.id === turn.id && live.status !== "inProgress"))) continue;
-      if (pendingEvents.current.some(event => event.key === key)) continue;
-      if ((requests[target] || []).some(request => isThreadApproval(request, id))) continue;
-      void submit(target, id, item);
-      break;
-    }
-  }, [queues, cache, sessions, requests, device, available, availableDevices, sending, submit, commandState]);
 
   const runCommand = async (method: string, params: Json = {}, expected = { device, id: selected }): Promise<Json> => {
     const current = active.current, target = expected.device, id = expected.id;
@@ -792,21 +764,18 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     setCache(previous => ({ ...previous, [key]: { ...previous[key], relayServiceTier: tier } }));
   };
 
-  const removeQueued = (id: string): QueuedMessage | undefined => {
+  const removeQueued = async (id: string, restore?: { key: string; before: Promise<void> }): Promise<QueuedMessage | undefined> => {
     const current = active.current;
     if (!current.selected) return;
-    const key = keyOf(current.device, current.selected);
-    const item = queued.current[key]?.items.find(item => item.id === id);
-    if (!item || item.status === "sending") return;
-    updateQueues(previous => ({ ...previous, [key]: { ...previous[key], items: previous[key].items.filter(row => row.id !== id) } }));
-    return item;
+    try {
+      if (restore) await restore.before;
+      return await command<QueuedMessage>("queue_remove", { key: keyOf(current.device, current.selected), id, restoreDraft: restore?.key });
+    } catch (error) { onErrorRef.current(message(error)); }
   };
   const resumeQueue = (retryId?: string) => {
     const current = active.current;
-    if (!current.selected || !current.available) return;
-    const key = keyOf(current.device, current.selected), queue = queued.current[key];
-    if (!queue || !resumed.current.has(key)) return;
-    updateQueues(previous => ({ ...previous, [key]: { items: queue.items.map(item => item.id === retryId && item.status === "failed" ? { ...item, status: "queued", error: undefined } : item) } }));
+    if (!current.selected || !current.available || !resumed.current.has(keyOf(current.device, current.selected))) return;
+    void command("queue_resume", { key: keyOf(current.device, current.selected), retry: retryId || null }).catch(error => onErrorRef.current(message(error)));
   };
   const thread = selected ? cache[keyOf(device, selected)] : undefined;
   const session = selected ? sessions[keyOf(device, selected)] : undefined;
@@ -872,7 +841,7 @@ export function useWorkbench(device: string, available: boolean, onError: (error
     serviceTier: thread?.relayServiceTier as string | undefined,
     commandBusy: selected ? commandState[keyOf(device, selected)] : undefined,
     ready, resumeError: session?.resumeError, historyError: session?.historyError,
-    open, event, create, send, stop, resolve, older,
+    open, event, create, send, stop, resolve, older, restoredDrafts,
     refresh: () => { refreshTargets.current.add(active.current.device); setEnvironmentRevision(previous => previous + 1); },
     loadMore: () => fetchList(nextCursor, search.trim()),
     loadMoreArchived: () => fetchList(archivedNextCursor, search.trim(), true),

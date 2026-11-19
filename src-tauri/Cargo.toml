@@ -14,8 +14,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-relay-core = { path = "../crates/relay-core" }
-tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+relay-core = { path = "../crates/relay-core", default-features = false }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 anyhow.workspace = true
@@ -23,7 +23,14 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tempfile = "3"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+relay-core = { path = "../crates/relay-core", features = ["local-executor"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-updater = "~2.12.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

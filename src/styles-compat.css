@@ -1,0 +1,68 @@
+/* WebView 110 尚不支持 color-mix，使用同一调色板的预混合颜色。 */
+@supports not (color: color-mix(in srgb,red,blue)) {
+  :root {
+    --mix-warning-9-surface: rgba(245,241,235,1);
+    --mix-error-7-surface: rgba(250,242,241,1);
+    --mix-blue-40-transparent: rgba(22,116,239,0.4);
+    --mix-blue-22-transparent: rgba(22,116,239,0.22);
+    --mix-secondary-25-transparent: rgba(96,104,117,0.25);
+    --mix-text-12-transparent: rgba(37,39,44,0.12);
+    --mix-green-10-transparent: rgba(54,173,114,0.1);
+    --mix-secondary-36-surface: rgba(198,201,205,1);
+    --mix-surface-70-transparent: rgba(255,255,255,0.7);
+    --mix-blue-50-transparent: rgba(22,116,239,0.5);
+    --mix-warning-35-line: rgba(133,97,35,0.40525);
+    --mix-warning-30-transparent: rgba(148,104,30,0.3);
+    --mix-blue-35-transparent: rgba(22,116,239,0.35);
+    --mix-blue-20-surface: rgba(208,227,252,1);
+    --mix-blue-5-transparent: rgba(22,116,239,0.05);
+    --mix-warning-35-transparent: rgba(148,104,30,0.35);
+    --mix-blue-3-surface: rgba(248,251,255,1);
+    --mix-blue-20-transparent: rgba(22,116,239,0.2);
+    --mix-error-30-transparent: rgba(180,68,60,0.3);
+  }
+  :root[data-theme="dark"] {
+    --mix-warning-9-surface: rgba(50,47,44,1);
+    --mix-error-7-surface: rgba(46,42,45,1);
+    --mix-blue-40-transparent: rgba(80,155,255,0.4);
+    --mix-blue-22-transparent: rgba(80,155,255,0.22);
+    --mix-secondary-25-transparent: rgba(177,184,196,0.25);
+    --mix-text-12-transparent: rgba(233,235,240,0.12);
+    --mix-green-10-transparent: rgba(85,198,138,0.1);
+    --mix-secondary-36-surface: rgba(84,88,95,1);
+    --mix-surface-70-transparent: rgba(32,34,38,0.7);
+    --mix-blue-50-transparent: rgba(80,155,255,0.5);
+    --mix-warning-35-line: rgba(225,187,122,0.4085);
+    --mix-warning-30-transparent: rgba(227,181,102,0.3);
+    --mix-blue-35-transparent: rgba(80,155,255,0.35);
+    --mix-blue-20-surface: rgba(42,58,81,1);
+    --mix-blue-5-transparent: rgba(80,155,255,0.05);
+    --mix-warning-35-transparent: rgba(227,181,102,0.35);
+    --mix-blue-3-surface: rgba(33,38,45,1);
+    --mix-blue-20-transparent: rgba(80,155,255,0.2);
+    --mix-error-30-transparent: rgba(238,145,134,0.3);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+    --mix-warning-9-surface: rgba(50,47,44,1);
+    --mix-error-7-surface: rgba(46,42,45,1);
+    --mix-blue-40-transparent: rgba(80,155,255,0.4);
+    --mix-blue-22-transparent: rgba(80,155,255,0.22);
+    --mix-secondary-25-transparent: rgba(177,184,196,0.25);
+    --mix-text-12-transparent: rgba(233,235,240,0.12);
+    --mix-green-10-transparent: rgba(85,198,138,0.1);
+    --mix-secondary-36-surface: rgba(84,88,95,1);
+    --mix-surface-70-transparent: rgba(32,34,38,0.7);
+    --mix-blue-50-transparent: rgba(80,155,255,0.5);
+    --mix-warning-35-line: rgba(225,187,122,0.4085);
+    --mix-warning-30-transparent: rgba(227,181,102,0.3);
+    --mix-blue-35-transparent: rgba(80,155,255,0.35);
+    --mix-blue-20-surface: rgba(42,58,81,1);
+    --mix-blue-5-transparent: rgba(80,155,255,0.05);
+    --mix-warning-35-transparent: rgba(227,181,102,0.35);
+    --mix-blue-3-surface: rgba(33,38,45,1);
+    --mix-blue-20-transparent: rgba(80,155,255,0.2);
+    --mix-error-30-transparent: rgba(238,145,134,0.3);
+    }
+  }
+}

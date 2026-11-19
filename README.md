@@ -21,11 +21,11 @@
   <a href="./docs/开发指南.md">开发指南</a>
 </p>
 
-<p align="center">Windows 预览版 · Rust + Tauri · MIT</p>
+<p align="center">Windows 桌面版 · Android 远程端 · Rust + Tauri · MIT</p>
 
 ---
 
-Relay 为两台电脑提供统一的 Codex 工作台。支持局域网直连，也支持通过自建 Cloudflare Workers 中继进行异地连接。代码、运行环境和 Codex 登录信息留在执行任务的电脑上。
+Relay 为电脑和安卓手机提供统一的 Codex 工作台。安卓端共用桌面版的业务逻辑与视觉样式，支持远程会话、命令、审批、后台通知及草稿恢复；手机的安装和配对见[安卓使用指南](./docs/安卓使用.md)。支持局域网直连，也支持通过自建 Cloudflare Workers 中继进行异地连接。代码、运行环境和 Codex 登录信息留在执行任务的电脑上。
 
 ## 功能
 
@@ -67,7 +67,7 @@ Relay 管理独立的 Codex 进程，不接管其他客户端正在运行的任�
 
 ## 开发
 
-环境准备、源码运行和 Windows 打包步骤见[开发指南](./docs/开发指南.md)。
+环境准备、源码运行及 Windows／Android 打包步骤见[开发指南](./docs/开发指南.md)。
 
 ## 致谢与许可
 

@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AlertCircle, Blocks, ChevronRight, FileCode2, ListChecks, Loader2, MessageSquare, X } from "lucide-react";
@@ -157,19 +157,46 @@ export function Transcript({ thread, running, older, hasOlder, loading, offline 
   const bottom = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const scroll = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (follow.current) bottom.current?.scrollIntoView({ block: "end", behavior: "auto" });
-  }, [thread]);
-  useEffect(() => { follow.current = true; bottom.current?.scrollIntoView({ block: "end" }); }, [thread.id]);
-  return <ReferenceContext.Provider value={onReference}><PlanContext.Provider value={onImplementPlan}><div className="transcript" ref={scroll} onScroll={() => { const el = scroll.current; if (el) follow.current = el.scrollHeight - el.clientHeight - el.scrollTop < 160; }}>
+  const positions = useRef(new Map<string, { top: number; following: boolean }>());
+  const olderAnchor = useRef<{ height: number; top: number } | null>(null);
+  const [away, setAway] = useState(false);
+  useLayoutEffect(() => {
+    const el = scroll.current;
+    if (!el) return;
+    if (olderAnchor.current && !loading) {
+      el.scrollTop = olderAnchor.current.top + el.scrollHeight - olderAnchor.current.height;
+      olderAnchor.current = null;
+    } else if (follow.current) bottom.current?.scrollIntoView({ block: "end", behavior: "auto" });
+  }, [thread, loading]);
+  useLayoutEffect(() => {
+    const saved = positions.current.get(thread.id);
+    follow.current = saved?.following ?? true;
+    setAway(!follow.current);
+    if (saved && !saved.following && scroll.current) scroll.current.scrollTop = saved.top;
+    else bottom.current?.scrollIntoView({ block: "end" });
+  }, [thread.id]);
+  const latest = () => { follow.current = true; setAway(false); bottom.current?.scrollIntoView({ block: "end", behavior: "auto" }); };
+  return <ReferenceContext.Provider value={onReference}><PlanContext.Provider value={onImplementPlan}><div className="transcript-wrapper"><div className="transcript" ref={scroll} onScroll={() => {
+    const el = scroll.current;
+    if (el) {
+      follow.current = el.scrollHeight - el.clientHeight - el.scrollTop < 100;
+      positions.current.set(thread.id, { top: el.scrollTop, following: follow.current });
+      setAway(!follow.current);
+    }
+  }}>
     <div className="transcript-inner">
-      {hasOlder && <button className="load-older" disabled={offline || loading} title={offline ? "连接恢复后可加载更早的回合" : undefined} onClick={() => { follow.current = false; older(); }}>{loading ? "正在读取…" : "加载更早的回合"}</button>}
+      {hasOlder && <button className="load-older" disabled={offline || loading} title={offline ? "连接恢复后可加载更早的回合" : undefined} onClick={() => {
+        follow.current = false;
+        const el = scroll.current;
+        if (el) olderAnchor.current = { height: el.scrollHeight, top: el.scrollTop };
+        older();
+      }}>{loading ? "正在读取…" : "加载更早的回合"}</button>}
       {(thread.turns || []).map((turn: Json) => <Turn key={`${thread.id}:${turn.id}`} turn={turn} running={running && turn.status === "inProgress"} />)}
       {running && !(thread.turns || []).some((turn: Json) => turn.status === "inProgress") && <div className="working-indicator"><span className="pulse-dot" />Codex 正在处理</div>}
       {thread.interrupted && <div className="inline-error"><AlertCircle size={15} />进程连接已结束，请刷新会话确认最终状态。</div>}
       <div ref={bottom} />
     </div>
-  </div></PlanContext.Provider></ReferenceContext.Provider>;
+  </div>{away && <button className="jump-latest" onClick={latest} aria-label="回到最新消息">回到最新消息 ↓</button>}</div></PlanContext.Provider></ReferenceContext.Provider>;
 }
 
 export function Inspector({ thread, close }: { thread: Json | undefined; close: () => void }) {

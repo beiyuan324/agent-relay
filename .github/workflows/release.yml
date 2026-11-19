@@ -59,25 +59,13 @@ jobs:
 
       - run: npm ci
 
-      - name: Build and upload signed Windows updater
-        id: release
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+      - name: Build signed Windows updater
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ env.RELAY_RELEASE_TAG }}
-          releaseName: "Relay ${{ env.RELAY_RELEASE_TAG }}"
-          releaseDraft: true
-          prerelease: false
-          generateReleaseNotes: true
-          uploadUpdaterJson: true
-          updaterJsonPreferNsis: true
-          uploadUpdaterSignatures: true
-          args: --bundles nsis -- --locked
+        run: npm run bundle -- --bundles nsis -- --locked
 
-      - name: Finalize updater manifest and checksums
+      - name: Upload draft release with GitHub CLI
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,20 +77,40 @@ jobs:
             "$relayHash  $($_.Name)"
           }
           Set-Content -LiteralPath target/release/bundle/nsis/SHA256SUMS.txt -Value $relayHashes -Encoding utf8NoBOM
-          gh release download $env:RELAY_RELEASE_TAG --pattern latest.json --dir target/release/bundle/nsis --clobber
-          if ($LASTEXITCODE -ne 0) { throw "Failed to download updater manifest" }
-          $relayManifestPath = "target/release/bundle/nsis/latest.json"
-          $relayManifest = Get-Content -LiteralPath $relayManifestPath -Raw | ConvertFrom-Json
+          $relaySignaturePath = "$($relayInstallers[0].FullName).sig"
+          $relaySignature = (Get-Content -LiteralPath $relaySignaturePath -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($relaySignature)) { throw "Missing updater signature" }
+
+          $relayIsDraft = gh release view $env:RELAY_RELEASE_TAG --json isDraft --jq .isDraft
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELAY_RELEASE_TAG --title "Relay $env:RELAY_RELEASE_TAG" --draft --verify-tag --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create draft release" }
+          } elseif ($relayIsDraft -ne "true") {
+            throw "Release already published; only draft releases can be updated"
+          }
+
+          $relayNotes = gh release view $env:RELAY_RELEASE_TAG --json body --jq .body
+          if ($LASTEXITCODE -ne 0) { throw "Failed to read release notes" }
+          $relayNotes = $relayNotes -join "`n"
           $relayNotesPath = "docs/releases/$env:RELAY_RELEASE_TAG.md"
           if (Test-Path -LiteralPath $relayNotesPath) {
-            $relayManifest.notes = Get-Content -LiteralPath $relayNotesPath -Raw
+            $relayNotes = Get-Content -LiteralPath $relayNotesPath -Raw
           }
           $relayReleaseBase = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/download/$env:RELAY_RELEASE_TAG"
-          foreach ($relayPlatform in $relayManifest.platforms.PSObject.Properties) {
-            if ($relayPlatform.Name -like "windows-x86_64*") {
-              $relayPlatform.Value.url = "$relayReleaseBase/$($relayInstallers[0].Name)"
+          $relayPlatform = @{
+            signature = $relaySignature
+            url = "$relayReleaseBase/$($relayInstallers[0].Name)"
+          }
+          $relayManifest = @{
+            version = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+            notes = $relayNotes
+            pub_date = [DateTime]::UtcNow.ToString("o")
+            platforms = @{
+              "windows-x86_64" = $relayPlatform
+              "windows-x86_64-nsis" = $relayPlatform
             }
           }
+          $relayManifestPath = "target/release/bundle/nsis/latest.json"
           Set-Content -LiteralPath $relayManifestPath -Value ($relayManifest | ConvertTo-Json -Depth 12) -Encoding utf8NoBOM
-          gh release upload $env:RELAY_RELEASE_TAG $relayManifestPath target/release/bundle/nsis/SHA256SUMS.txt --clobber
-          if ($LASTEXITCODE -ne 0) { throw "Failed to upload release metadata" }
+          gh release upload $env:RELAY_RELEASE_TAG $relayInstallers[0].FullName $relaySignaturePath $relayManifestPath target/release/bundle/nsis/SHA256SUMS.txt --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload release assets" }

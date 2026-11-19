@@ -1,0 +1,14 @@
+{
+  "identifier": "mobile-capability",
+  "description": "Relay 安卓界面的事件和剪贴板能力",
+  "platforms": [
+    "android"
+  ],
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "clipboard-manager:allow-write-text"
+  ]
+}

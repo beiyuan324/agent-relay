@@ -1,7 +1,9 @@
-use crate::{codex::Codex, crypto, model::*, net::{self, Transport, Wire}, remote, tunnel};
+#[cfg(feature = "local-executor")]
+use crate::codex::Codex;
+use crate::{crypto, model::*, net::{self, Transport, Wire}, remote, tunnel};
 use anyhow::{anyhow, bail, ensure, Result};
 use serde_json::Value;
-use std::{collections::HashMap, sync::{Arc, Mutex as StdMutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use std::{collections::HashMap, sync::{Arc, Mutex as StdMutex, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 use tokio::{net::TcpListener, sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore}};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_util::sync::CancellationToken;
@@ -23,8 +25,14 @@ struct Peer {
     connection: RwLock<Option<Arc<Connection>>>,
 }
 pub struct Host {
+    #[cfg(feature = "local-executor")]
     pub codex: Arc<Codex>,
+    local_events: broadcast::Sender<Value>,
+    listening: AtomicBool,
+    active: AtomicBool,
+    network: tokio::sync::Notify,
     pub events: broadcast::Sender<AppEvent>,
+    pub event_sequence: AtomicU64,
     settings: RwLock<Settings>,
     peers: RwLock<HashMap<String,Arc<Peer>>>,
     cancel: CancellationToken,
@@ -34,30 +42,42 @@ pub struct Host {
 impl Host {
     pub fn new(settings: Settings) -> Arc<Self> {
         let (events, _) = broadcast::channel(2048);
-        Arc::new(Self {codex:Codex::new(settings.codex_path.clone()),events,settings:RwLock::new(settings),peers:RwLock::new(HashMap::new()),cancel:CancellationToken::new(),listener_error:RwLock::new(None),operations:Arc::new(RwLock::new(()))})
+        #[cfg(feature = "local-executor")]
+        let codex = Codex::new(settings.codex_path.clone());
+        #[cfg(feature = "local-executor")]
+        let local_events = codex.events.clone();
+        #[cfg(not(feature = "local-executor"))]
+        let (local_events, _) = broadcast::channel(16);
+        Arc::new(Self { #[cfg(feature = "local-executor")] codex, local_events, listening: AtomicBool::new(false), active: AtomicBool::new(true), network: tokio::sync::Notify::new(), events, event_sequence: AtomicU64::new(0),settings:RwLock::new(settings),peers:RwLock::new(HashMap::new()),cancel:CancellationToken::new(),listener_error:RwLock::new(None),operations:Arc::new(RwLock::new(()))})
     }
     pub async fn start(self: &Arc<Self>) {
         let host = self.clone();
         tokio::spawn(async move {
-            let mut events = host.codex.events.subscribe();
+            let mut events = host.local_events.subscribe();
             loop {
                 tokio::select! {
                     _ = host.cancel.cancelled()=>break,
                     event = events.recv()=>match event {
-                        Ok(message)=>{let _=host.events.send(AppEvent::Codex{device:"local".into(),message});},
+                        Ok(message)=>{host.codex_event("local".into(),message);},
                         Err(broadcast::error::RecvError::Lagged(_))=>{let _=host.events.send(AppEvent::Diagnostic{message:"本机事件过快，请刷新会话以同步历史".into()});},
                         Err(_)=>break,
                     }
                 }
             }
         });
+        #[cfg(not(target_os = "android"))]
+        self.start_listener().await;
+    }
+    pub async fn start_listener(self: &Arc<Self>) {
+        if self.listening.swap(true, Ordering::AcqRel) { return; }
         let host=self.clone();
         tokio::spawn(async move {
             let port=host.settings.read().await.listen_port;
             let listener=match TcpListener::bind(("0.0.0.0",port)).await {
                 Ok(listener)=>listener,
-                Err(_)=>{let message=format!("局域网端口 {port} 无法监听。请关闭占用程序后重启 Relay，异地连接仍可使用。");*host.listener_error.write().await=Some(message.clone());let _=host.events.send(AppEvent::Diagnostic{message});return;}
+                Err(_)=>{let message=format!("局域网端口 {port} 无法监听。请关闭占用程序后重启 Relay，异地连接仍可使用。");host.listening.store(false, Ordering::Release);*host.listener_error.write().await=Some(message.clone());let _=host.events.send(AppEvent::Diagnostic{message});return;}
             };
+            *host.listener_error.write().await=None;
             loop {
                 let accepted=tokio::select!{_=host.cancel.cancelled()=>break,result=listener.accept()=>result};
                 let Ok((stream,_))=accepted else {continue};
@@ -99,6 +119,13 @@ impl Host {
         let mut backoff=1;
         loop {
             if peer.cancel.is_cancelled(){break;}
+            let resumed=self.network.notified();
+            tokio::pin!(resumed);
+            resumed.as_mut().enable();
+            if !self.active.load(Ordering::Acquire) {
+                tokio::select! { _=peer.cancel.cancelled()=>break, _=&mut resumed=>{} }
+                continue;
+            }
             self.update(&peer,"connecting",None).await;
             let config=peer.config.read().await.clone();
             let result:Result<Transport>=async {
@@ -118,6 +145,13 @@ impl Host {
         let mut backoff=1;
         loop {
             if peer.cancel.is_cancelled(){break;}
+            let resumed=self.network.notified();
+            tokio::pin!(resumed);
+            resumed.as_mut().enable();
+            if !self.active.load(Ordering::Acquire) {
+                tokio::select! { _=peer.cancel.cancelled()=>break, _=&mut resumed=>{} }
+                continue;
+            }
             self.update(&peer,"connecting",None).await;
             let config=peer.config.read().await.clone();
             let name=self.settings.read().await.identity.name.clone();
@@ -132,6 +166,7 @@ impl Host {
                 tokio::select! {
                     _=peer.cancel.cancelled()=>{accept.abort();return;},
                     result=&mut register=>result,
+                    _=self.network.notified()=>Err(anyhow!("网络连接状态已变化")),
                 }
             };
             accept.abort();
@@ -156,7 +191,7 @@ impl Host {
     async fn publish(&self,peer:&Peer) {let _=self.events.send(AppEvent::Device{device:peer.view.read().await.clone()});}
     async fn session(self:Arc<Self>,peer:Arc<Peer>,mut transport:Transport,initiator:bool) {
         let Ok(_guard)=peer.session_lock.try_lock() else{return};
-        if peer.cancel.is_cancelled(){return;}
+        if peer.cancel.is_cancelled() || !self.active.load(Ordering::Acquire){return;}
         self.update(&peer,"handshaking",None).await;
         let result:Result<()>=async {
             let (mut send_cipher,mut receive_cipher)=tokio::select! {
@@ -187,7 +222,7 @@ impl Host {
                     }
                 }
             });
-            let mut local_events=self.codex.events.subscribe();
+            let mut local_events=self.local_events.subscribe();
             let mut heartbeat=tokio::time::interval(Duration::from_secs(15));
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut last=Instant::now();
@@ -264,7 +299,7 @@ impl Host {
                                     // Finish accepted calls even if the peer disconnects, so local
                                     // approval and turn bookkeeping reaches a consistent state.
                                     let _operation=host.operations.read().await;
-                                    let result=host.codex.call(&method,params).await;
+                                    let result=host.local_call(&method,params).await;
                                     if connection.cancel.is_cancelled() || !host.settings.read().await.sharing || !connection.ready.load(Ordering::Acquire){return;}
                                     let frame=match result{Ok(value)=>Control::Response{id:request_id,result:Some(value),error:None},Err(error)=>Control::Response{id:request_id,result:None,error:Some(error.to_string())}};
                                     let _=connection.outgoing.send(frame).await;
@@ -276,7 +311,7 @@ impl Host {
                             }
                             Control::Event{message}=>{
                                 ensure!(connection.ready.load(Ordering::Acquire) && peer.view.read().await.peer_sharing,"设备未共享");
-                                let _=self.events.send(AppEvent::Codex{device:id.clone(),message});
+                                self.codex_event(id.clone(),message);
                             }
                             Control::Ping=>{connection.outgoing.try_send(Control::Pong).map_err(|_|anyhow!("设备发送队列已满"))?;}
                             Control::Pong=>{}
@@ -297,12 +332,14 @@ impl Host {
     }
     pub async fn prepare_update(&self)->Result<tokio::sync::OwnedRwLockWriteGuard<()>> {
         let guard=self.operations.clone().try_write_owned().map_err(|_|anyhow!("还有设备请求正在处理，请稍后安装更新"))?;
+        #[cfg(feature = "local-executor")]
         ensure!(!self.codex.has_pending_work().await,"本机还有运行中的回合或待处理审批，请完成后再安装更新");
         Ok(guard)
     }
     pub async fn call(&self,device:&str,method:&str,params:Value)->Result<Value>{
         let _operation=self.operations.read().await;
-        if device=="local"{return self.codex.call(method,params).await;}
+        ensure!(self.active.load(Ordering::Acquire),"后台连接已停止，请打开 Relay 后重试");
+        if device=="local"{return self.local_call(method,params).await;}
         let peer=self.peers.read().await.get(device).cloned().ok_or_else(||anyhow!("设备不存在"))?;
         let connection=peer.connection.read().await.clone().ok_or_else(||anyhow!("设备未连接"))?;
         ensure!(connection.ready.load(Ordering::Acquire),"需要双方确认配对");
@@ -355,10 +392,14 @@ impl Host {
         let mut settings=self.settings.write().await;
         let changed=settings.codex_path!=codex_path;
         settings.codex_path=codex_path.clone();settings.relay_url=relay_url;settings.theme=theme;settings.identity.name=name.trim().into();drop(settings);
+        #[cfg(feature = "local-executor")]
         if changed{self.codex.set_path(codex_path).await;}
+        #[cfg(not(feature = "local-executor"))]
+        let _ = changed;
         let _=self.events.send(AppEvent::Persist);Ok(())
     }
     pub async fn share(&self,enabled:bool) {
+        let enabled = enabled && cfg!(feature = "local-executor");
         self.settings.write().await.sharing=enabled;
         let peers:Vec<_>=self.peers.read().await.values().cloned().collect();
         for peer in peers {
@@ -368,6 +409,30 @@ impl Host {
         }
         let _=self.events.send(AppEvent::Persist);
     }
+    fn codex_event(&self, device: String, mut message: Value) {
+        let sequence=self.event_sequence.fetch_add(1, Ordering::AcqRel)+1;
+        message["relaySequence"]=serde_json::json!(sequence);
+        let _=self.events.send(AppEvent::Codex{device,message});
+    }
+    pub async fn set_active(&self, active: bool) {
+        if self.active.swap(active, Ordering::AcqRel)==active {return;}
+        if !active {
+            for peer in self.peers.read().await.values() {
+                if let Some(connection)=peer.connection.read().await.as_ref(){connection.cancel.cancel();}
+            }
+        }
+        self.network.notify_waiters();
+    }
     pub async fn listener_error(&self)->Option<String>{self.listener_error.read().await.clone()}
-    pub async fn shutdown(&self){self.cancel.cancel();self.codex.shutdown().await;}
+    async fn local_call(&self, method: &str, params: Value) -> Result<Value> {
+        #[cfg(feature = "local-executor")]
+        { self.codex.call(method, params).await }
+        #[cfg(not(feature = "local-executor"))]
+        { let _ = (method, params); bail!("此设备仅用于远程操作，请选择执行电脑") }
+    }
+    pub async fn shutdown(&self){
+        self.cancel.cancel();
+        #[cfg(feature = "local-executor")]
+        self.codex.shutdown().await;
+    }
 }

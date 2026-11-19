@@ -47,10 +47,10 @@ async function availableSkills(device: string, cwd: string, refresh: boolean): P
   return { skills, errors };
 }
 
-export function MentionComposer({ device, threadId, cwd, deviceName, enabled, draft, onChange, inputRef, onSend, placeholder, commands = [], commandError, onCommand, onTogglePlan }: {
+export function MentionComposer({ device, threadId, cwd, deviceName, enabled, readOnly, draft, onChange, inputRef, onSend, placeholder, commands = [], commandError, onCommand, onTogglePlan }: {
   device: string; threadId: string; cwd: string; deviceName: string; enabled: boolean;
   draft: ComposerDraft; onChange: (draft: ComposerDraft) => void; inputRef: RefObject<HTMLTextAreaElement | null>;
-  onSend: () => void; placeholder: string;
+  onSend: () => void; placeholder: string; readOnly?: boolean;
   commands?: SlashCommand[]; commandError?: string; onCommand?: (command: SlashCommand) => void; onTogglePlan?: () => void;
 }) {
   const [caret, setCaret] = useState({ start: draft.text.length, end: draft.text.length });
@@ -84,7 +84,7 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
 
   useLayoutEffect(() => {
     if (!popupOpen || !anchor.current) return;
-    const element = anchor.current;
+    const element = anchor.current.closest<HTMLElement>(".composer") || anchor.current;
     const update = () => {
       const rect = element.getBoundingClientRect();
       const topInset = document.querySelector(".window-titlebar")?.getBoundingClientRect().bottom || 0;
@@ -231,7 +231,8 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
       {!skillsOnly && !cwd && (tab === "all" || tab === "files") && <div className="mention-search-hint" role="status">当前会话未提供项目路径，无法搜索文件。</div>}
       {!!errors.length && <details className="mention-query-errors"><summary>部分候选暂不可用</summary>{errors.map((error, index) => <p key={index}>{error}</p>)}</details>}
     </div>, document.body)}
-    <textarea ref={inputRef} aria-label={"向 " + deviceName + " 发送消息"} role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={popupOpen} aria-controls={popupOpen ? menuId : undefined} aria-activedescendant={slashOpen && slashOptions[selectedSlashIndex] ? menuId + "-" + selectedSlashIndex : open && options[activeIndex] ? menuId + "-" + activeIndex : undefined} placeholder={placeholder} value={draft.text} rows={2}
+    <textarea ref={inputRef} aria-label={"向 " + deviceName + " 发送消息"} role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={popupOpen} aria-controls={popupOpen ? menuId : undefined} aria-activedescendant={slashOpen && slashOptions[selectedSlashIndex] ? menuId + "-" + selectedSlashIndex : open && options[activeIndex] ? menuId + "-" + activeIndex : undefined} placeholder={placeholder} value={draft.text} rows={window.matchMedia("(max-width: 699px), (max-width: 999px) and (max-height: 499px) and (pointer: coarse)").matches ? 1 : 2}
+      readOnly={readOnly}
       onChange={event => { onChange(editDraft(draft, event.target.value)); setCaret({ start: event.target.selectionStart, end: event.target.selectionEnd }); }}
       onSelect={event => setCaret({ start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd })}
       onFocus={() => setDismissed("")}
@@ -252,7 +253,7 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
           }
           if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
             event.preventDefault(); event.stopPropagation();
-            if (slashOptions.length) chooseSlash(selectedSlashIndex); else if (event.key === "Enter") onSend();
+            if (slashOptions.length) chooseSlash(selectedSlashIndex); else if (event.key === "Enter" && !window.matchMedia("(max-width: 699px), (max-width: 999px) and (max-height: 499px) and (pointer: coarse)").matches) onSend();
             return;
           }
         }
@@ -269,7 +270,7 @@ export function MentionComposer({ device, threadId, cwd, deviceName, enabled, dr
             return;
           }
         }
-        if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); onSend(); }
+        if (event.key === "Enter" && !event.shiftKey && (!window.matchMedia("(max-width: 699px), (max-width: 999px) and (max-height: 499px) and (pointer: coarse)").matches || event.ctrlKey || event.metaKey)) { event.preventDefault(); onSend(); }
       }} />
     {!!validMentions(draft).length && <div className="mention-chips" aria-label="已选引用">{validMentions(draft).map(mention => <span className="mention-chip" key={mention.start + ":" + mention.path} title={mention.path}><TargetIcon kind={mention.kind} /><span>{mention.kind === "skill" ? "$" + mention.name : mention.label}</span><button type="button" aria-label={"移除引用 " + mention.label} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(removeMention(draft, mention)); focusAt(mention.start); }}><X size={12} /></button></span>)}</div>}
     <div className="mention-shortcuts">

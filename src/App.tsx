@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AlertCircle, Archive, ArchiveRestore, ArrowUp, ChevronDown, ChevronRight, CircleHelp, FileCode2, Folder, Laptop, Loader2, Monitor, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, Settings2, ShieldCheck, Square, X } from "lucide-react";
-import { call, command, desktop, message, stateLabels, subscribe, title, when, type Device, type Json, type Snapshot } from "./api";
+import { Activity, AlertCircle, Archive, ArchiveRestore, ArrowLeft, ArrowUp, ChevronDown, ChevronRight, CircleHelp, FileCode2, Folder, Laptop, Loader2, Monitor, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, Settings2, ShieldCheck, Square, X } from "lucide-react";
+import { android, call, command, mobileAction, native, subscribeResume, message, stateLabels, subscribe, title, when, type Device, type Json, type Snapshot } from "./api";
 import { useWorkbench } from "./workbench";
 import { isThreadApproval } from "./approvals";
 import { deviceKey as projectKey } from "./workbench-state";
@@ -33,7 +33,14 @@ function readCollapsedProjects(): Record<string, boolean> {
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const updates = useUpdates();
-  const [deviceId, setDeviceId] = useState("local");
+  const [deviceId, setDeviceId] = useState(() => android ? localStorage.getItem("relay.mobile.device") || "" : "local");
+  const mobile = useMediaQuery("(max-width: 699px), (max-width: 999px) and (max-height: 499px) and (pointer: coarse)");
+  const [mobilePage, setMobilePage] = useState<"list" | "conversation">(() => android && localStorage.getItem("relay.mobile.page") === "conversation" ? "conversation" : "list");
+  const [approvalSheet, setApprovalSheet] = useState(false);
+  const [composerOptions, setComposerOptions] = useState(false);
+  const [pairUri, setPairUri] = useState("");
+  const [pendingTarget, setPendingTarget] = useState<Json | null>(null);
+  const [notificationRequest, setNotificationRequest] = useState<Json | null>(null);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [commandDialog, setCommandDialog] = useState<CommandDialogState | null>(null);
   const [promptCatalog, setPromptCatalog] = useState<{ device: string; commands: SlashCommand[]; error?: string }>({ device: "", commands: [] });
@@ -47,7 +54,7 @@ export default function App() {
   const [referenceCopied, setReferenceCopied] = useState(false);
   const promptedPairs = useRef(new Set<string>());
   const [error, setError] = useState("");
-  const [booting, setBooting] = useState(desktop);
+  const [booting, setBooting] = useState(native);
   const [inspector, setInspector] = useState(false);
   const [windowMaximized, setWindowMaximized] = useState(false);
   const [sidebar, setSidebar] = useState(() => {
@@ -62,7 +69,7 @@ export default function App() {
   const workspaceWidth = useElementWidth(workspace);
   const inspectorDrawer = inspector && workspaceWidth < 960;
   const details = snapshot?.devices.find(device => device.id === detailId);
-  const modalOpen = dialog !== null || commandDialog !== null || !!details || reference !== null;
+  const modalOpen = dialog !== null || commandDialog !== null || !!details || reference !== null || approvalSheet || composerOptions;
   const modifier = /mac|iphone|ipad/i.test(snapshot?.settings.identity.platform || navigator.platform) ? "⌘" : "Ctrl";
   const toggleSidebar = () => {
     if (narrow) {
@@ -87,9 +94,9 @@ export default function App() {
   const composer = useRef<HTMLTextAreaElement>(null);
   const device = snapshot?.devices.find(device => device.id === deviceId);
   const local = deviceId === "local";
-  const available = desktop && !!snapshot && (local || (device?.state === "connected" && device.peerSharing));
+  const available = native && !!snapshot && ((local && snapshot.capabilities.localExecution) || (device?.state === "connected" && device.peerSharing));
   const deviceName = local ? snapshot?.settings.identity.name || "这台电脑" : device?.peer?.name || "另一台电脑";
-  const availableDevices = useMemo(() => new Set<string>(desktop && snapshot ? ["local", ...snapshot.devices.filter(device => device.state === "connected" && device.peerSharing).map(device => device.id)] : []), [snapshot]);
+  const availableDevices = useMemo(() => new Set<string>(native && snapshot ? [...(snapshot.capabilities.localExecution ? ["local"] : []), ...snapshot.devices.filter(device => device.state === "connected" && device.peerSharing).map(device => device.id)] : []), [snapshot]);
   const workbench = useWorkbench(deviceId, available, setError, availableDevices);
   const connectionLabel = local ? "本机执行" : !available ? device?.state === "connected" ? "共享已暂停" : "连接已断开" : workbench.opening ? "正在同步会话" : "加密连接";
   const openReference = useCallback((reference: MessageReference) => {
@@ -118,13 +125,13 @@ export default function App() {
     setSnapshot({ ...snapshot, devices: [...devices.values()] });
   }, []);
   const refresh = useCallback(async (select?: string) => {
-    if (!desktop) return;
+    if (!native) return;
     await readSnapshot();
     if (select) setDeviceId(select);
   }, [readSnapshot]);
 
   useEffect(() => {
-    if (!desktop) return;
+    if (!native) return;
     let stopped = false;
     let dispose: (() => void) | undefined;
     void (async () => {
@@ -159,10 +166,19 @@ export default function App() {
   }, [snapshot, details, dialog]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = snapshot?.settings.theme || "system";
+    const theme = snapshot?.settings.theme || "system";
+    document.documentElement.dataset.theme = theme;
+    if (!android) return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => { void mobileAction("theme", { dark: theme === "dark" || (theme === "system" && media.matches) }).catch(error => setError(message(error))); };
+    update(); media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
   }, [snapshot?.settings.theme]);
   useEffect(() => {
-    if (!local && snapshot && !device) { setDeviceId("local"); setDetailId(null); }
+    if (snapshot && !device && (!local || !snapshot.capabilities.localExecution)) {
+      setDeviceId(snapshot.capabilities.localExecution ? "local" : snapshot.devices.find(device => device.approved)?.id || snapshot.devices[0]?.id || "");
+      setDetailId(null);
+    }
   }, [snapshot, device, local]);
   useEffect(() => {
     setModel(""); setEffort("");
@@ -194,12 +210,93 @@ export default function App() {
   const archivedGroups = useMemo(() => groupProjectThreads(workbench.archivedThreads, workbench.projectCatalog, workbench.search).filter(group => group.threads.length), [workbench.archivedThreads, workbench.projectCatalog, workbench.search]);
   const projects = workbench.projectCatalog.data;
   const key = JSON.stringify([deviceId, workbench.thread?.relayDraftId || workbench.selected || ""]);
+  const draftsRestored = useRef(false);
+  const savedDrafts = useRef(new Map<string, ComposerDraft>());
+  const draftSaves = useRef(Promise.resolve());
+  const editingQueueRef = useRef<string | null>(null);
+  const [editingQueue, setEditingQueue] = useState<string | null>(null);
+  useEffect(() => {
+    if (!android || !workbench.restoredDrafts || draftsRestored.current) return;
+    draftsRestored.current = true;
+    savedDrafts.current = new Map(Object.entries(workbench.restoredDrafts));
+    setDrafts(previous => ({ ...workbench.restoredDrafts, ...previous }));
+  }, [workbench.restoredDrafts]);
+  useEffect(() => {
+    if (!android || !draftsRestored.current) return;
+    for (const [draftKey, value] of Object.entries(drafts)) {
+      if (savedDrafts.current.get(draftKey) === value) continue;
+      savedDrafts.current.set(draftKey, value);
+      const thread = draftKey === key && workbench.thread?.relayDraft ? workbench.thread : null;
+      draftSaves.current = draftSaves.current.then(() => command<void>("save_draft", { key: draftKey, draft: value, thread })).catch(error => {
+        savedDrafts.current.delete(draftKey); setError(message(error));
+      });
+    }
+  }, [drafts]);
+  const resumeAction = useRef<(target: Json) => void>(() => {});
+  resumeAction.current = target => {
+    void refresh().then(() => {
+      if (target.uri) { setPairUri(target.uri); setDialog("pair"); return; }
+      if (target.device) {
+        if (target.device === deviceId && available) workbench.refresh();
+        setDeviceId(target.device); setPendingTarget(target);
+      } else if (workbench.selected && available) workbench.refresh();
+    }).catch(error => setError(message(error)));
+  };
+  useEffect(() => {
+    if (!android) return;
+    let stopped = false;
+    let dispose: (() => void) | undefined;
+    void subscribeResume(target => { if (!stopped) resumeAction.current(target); }).then(async unlisten => { if (stopped) { unlisten(); return; } dispose = unlisten; const target = await mobileAction("launchTarget"); if (!stopped && (target.device || target.uri)) resumeAction.current(target); }).catch(error => setError(message(error)));
+    return () => { stopped = true; dispose?.(); };
+  }, []);
+  useEffect(() => {
+    if (!pendingTarget || pendingTarget.device !== deviceId || !available) return;
+    setPendingTarget(null);
+    if (pendingTarget.threadId) {
+      setMobilePage("conversation");
+      if (pendingTarget.requestId) setNotificationRequest(pendingTarget);
+      void workbench.open(pendingTarget.threadId);
+    } else if (device?.state === "pending") setDetailId(device.id);
+  }, [pendingTarget, deviceId, available]);
+  useEffect(() => {
+    if (!android || !deviceId) return;
+    localStorage.setItem("relay.mobile.device", deviceId);
+    if (workbench.selected && workbench.thread?.id === workbench.selected) localStorage.setItem("relay.mobile.thread." + deviceId, workbench.selected);
+  }, [deviceId, workbench.selected, workbench.thread?.id]);
+  const restoredSelections = useRef(new Set<string>());
+  useEffect(() => {
+    if (!android || !available || workbench.selected || restoredSelections.current.has(deviceId)) return;
+    restoredSelections.current.add(deviceId);
+    const previous = localStorage.getItem("relay.mobile.thread." + deviceId);
+    if (previous && !pendingTarget) void workbench.open(previous);
+  }, [deviceId, available, workbench.selected, pendingTarget]);
+  useEffect(() => { if (android) localStorage.setItem("relay.mobile.page", mobilePage); }, [mobilePage]);
+  const backAction = useRef<() => boolean>(() => false);
+  backAction.current = () => {
+    if (reference) setReference(null);
+    else if (commandDialog) setCommandDialog(null);
+    else if (details) setDetailId(null);
+    else if (dialog) setDialog(null);
+    else if (approvalSheet) setApprovalSheet(false);
+    else if (composerOptions) setComposerOptions(false);
+    else if (document.querySelector('[role="combobox"][aria-expanded="true"]')) document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    else if (sidebarOverlay) setSidebarOverlay(false);
+    else if (inspector) setInspector(false);
+    else if (mobile && mobilePage === "conversation") setMobilePage("list");
+    else return false;
+    return true;
+  };
+  useEffect(() => {
+    window.__relayBack = () => backAction.current();
+    return () => { delete window.__relayBack; };
+  }, []);
   const draftState = drafts[key] || EMPTY_DRAFT;
   const draft = draftState.text;
   const selectedModel = workbench.models.find((item: Json) => (item.model || item.id) === model);
   const efforts: Json[] = selectedModel?.supportedReasoningEfforts || [];
   const signedOut = workbench.environment?.account?.requiresOpenaiAuth && !workbench.environment?.account?.account;
-  const canCompose = available && workbench.ready && !workbench.commandBusy && !workbench.opening && !workbench.thread?.relayArchived && !workbench.isArchiveBusy(workbench.selected || "") && workbench.environment?.installed !== false && !signedOut;
+  const activeDraftKey = useRef(key); activeDraftKey.current = key;
+  const canCompose = editingQueue === null && available && workbench.ready && !workbench.commandBusy && !workbench.opening && !workbench.thread?.relayArchived && !workbench.isArchiveBusy(workbench.selected || "") && workbench.environment?.installed !== false && !signedOut;
   useEffect(() => {
     if (!available) return;
     let stopped = false;
@@ -239,6 +336,13 @@ export default function App() {
     return { ...command, disabledReason };
   }), [deviceId, promptCatalog, persisted, occupied, planPreset, modeCatalog.error, fastTier, efforts.length, workbench.models.length, workbench.mode, workbench.requests, workbench.selected, workbench.commandBusy]);
   const consumeDraft = (sent: ComposerDraft, draftKey: string, next = EMPTY_DRAFT) => setDrafts(previous => previous[draftKey] === sent ? { ...previous, [draftKey]: next } : previous);
+  const enqueueDraft = (input: ComposerDraft, sent: ComposerDraft, next: ComposerDraft, mode?: "default" | "plan") => {
+    const pending = workbench.send(input, effectiveModel, effort, mode, workbench.serviceTier, android ? {
+      before: draftSaves.current, transition: { key, expected: sent, next },
+    } : undefined);
+    if (android) draftSaves.current = Promise.all([draftSaves.current, pending]).then(() => {});
+    return pending;
+  };
   const togglePlan = () => {
     if (!planPreset && workbench.mode !== "plan") { setError("执行电脑未提供计划模式，请等待模式目录加载或升级 Codex。"); return; }
     workbench.setMode(workbench.mode === "plan" ? "default" : "plan");
@@ -265,7 +369,7 @@ export default function App() {
       if (command.id === "plan") {
         const next = argument === "off" || argument === "default" ? "default" : argument ? "plan" : workbench.mode === "plan" ? "default" : "plan";
         if (argument && !["on", "off", "default"].includes(argument)) {
-          if (!await workbench.send(editDraft(sent, argument), effectiveModel, effort, next, workbench.serviceTier)) return;
+          if (!await enqueueDraft(editDraft(sent, argument), sent, EMPTY_DRAFT, next)) return;
         }
         workbench.setMode(next); consume(); return;
       }
@@ -284,7 +388,8 @@ export default function App() {
       }
       if (command.id === "skills" || command.id === "apps") { consume(editDraft(sent, (command.id === "skills" ? "$" : "@") + argument + (preserved?.text ? " " + preserved.text : ""))); window.requestAnimationFrame(() => { composer.current?.focus(); composer.current?.setSelectionRange(1 + argument.length, 1 + argument.length); }); return; }
       if (command.id === "init") {
-        if (await workbench.send(editDraft(sent, "请检查当前项目，并为项目创建或完善 AGENTS.md，记录项目结构、开发约定、常用命令和注意事项。" + (argument ? "\n补充要求：" + argument : "")), effectiveModel, effort, planPreset || workbench.thread?.relayMode ? workbench.mode : undefined, workbench.serviceTier)) consume();
+        const input = editDraft(sent, "请检查当前项目，并为项目创建或完善 AGENTS.md，记录项目结构、开发约定、常用命令和注意事项。" + (argument ? "\n补充要求：" + argument : ""));
+        if (await enqueueDraft(input, sent, preserved || EMPTY_DRAFT, planPreset || workbench.thread?.relayMode ? workbench.mode : undefined)) consume();
         return;
       }
       if (command.id === "compact") { if (argument) throw new Error("/compact 不接受额外参数"); await workbench.runCommand("thread/compact/start", {}, scope); consume(); return; }
@@ -339,7 +444,7 @@ export default function App() {
       return;
     }
     const sent = draftState, draftKey = key;
-    if (await workbench.send(sent, effectiveModel, effort, workbench.thread?.relayMode, workbench.serviceTier)) consumeDraft(sent, draftKey);
+    if (await enqueueDraft(sent, sent, EMPTY_DRAFT, workbench.thread?.relayMode)) consumeDraft(sent, draftKey);
   };
   const implementPlan = async (plan: string) => {
     if (!canCompose || !planPreset) return;
@@ -366,15 +471,24 @@ export default function App() {
     else if (commandDialog.kind === "goal") await workbench.runCommand(value.action === "clear" ? "thread/goal/clear" : "thread/goal/set", value.action === "clear" ? {} : value.action === "status" ? { status: value.status } : value, scope);
   };
   const queueing = !!workbench.activeTurn || workbench.sending || workbench.queue.length > 0;
-  const editQueued = (id: string) => {
-    if (draft.length) return;
-    const item = workbench.removeQueued(id);
-    if (!item) return;
-    setDrafts(previous => ({ ...previous, [key]: item.draft }));
-    setModel(item.model); setEffort(item.effort);
-    if (item.collaborationMode || planPreset) workbench.setMode(item.collaborationMode || "default");
-    if (item.serviceTier || workbench.serviceTier) workbench.setServiceTier(item.serviceTier || "default");
-    window.requestAnimationFrame(() => { composer.current?.focus(); composer.current?.setSelectionRange(item.draft.text.length, item.draft.text.length); });
+  const editQueued = async (id: string) => {
+    if (draft.length || editingQueueRef.current !== null) return;
+    editingQueueRef.current = key;
+    setEditingQueue(key);
+    try {
+      const item = await workbench.removeQueued(id, android ? { key, before: draftSaves.current } : undefined);
+      if (!item) return;
+      if (android) savedDrafts.current.set(key, item.draft);
+      setDrafts(previous => ({ ...previous, [key]: item.draft }));
+      if (activeDraftKey.current !== key) return;
+      setModel(item.model); setEffort(item.effort);
+      if (item.collaborationMode || planPreset) workbench.setMode(item.collaborationMode || "default");
+      if (item.serviceTier || workbench.serviceTier) workbench.setServiceTier(item.serviceTier || "default");
+      window.requestAnimationFrame(() => { if (activeDraftKey.current === key) { composer.current?.focus(); composer.current?.setSelectionRange(item.draft.text.length, item.draft.text.length); } });
+    } finally {
+      editingQueueRef.current = null;
+      setEditingQueue(null);
+    }
   };
   useEffect(() => {
     if (composer.current) { composer.current.style.height = "auto"; composer.current.style.height = `${Math.min(composer.current.scrollHeight, 180)}px`; }
@@ -417,6 +531,7 @@ export default function App() {
     setCreatingProjectKey(projectKey(target, project?.id || "unassigned"));
     try {
       await workbench.create(cwd, model, target, project?.id);
+      setMobilePage("conversation");
       setCollapsedProjects(previous => { const next = { ...previous, [projectKey(target, project?.id || "unassigned")]: false }; if (project) for (const root of project.rootPaths) delete next[projectKey(target, root)]; return next; });
     } finally {
       creatingThread.current = false;
@@ -424,6 +539,13 @@ export default function App() {
     }
   };
   const approvalForThread = workbench.requests.filter(request => isThreadApproval(request, workbench.selected));
+  useEffect(() => { if (!approvalForThread.length) setApprovalSheet(false); }, [approvalForThread.length]);
+  useEffect(() => {
+    if (!notificationRequest || notificationRequest.device !== deviceId || notificationRequest.threadId !== workbench.selected || !workbench.ready || workbench.opening) return;
+    if (approvalForThread.some(request => String(request.id) === String(notificationRequest.requestId))) {
+      setApprovalSheet(true); setNotificationRequest(null);
+    }
+  }, [notificationRequest, deviceId, workbench.selected, workbench.ready, workbench.opening, approvalForThread]);
   const renderProjectGroups = (groups: ProjectGroup[], archived: boolean) => groups.map(group => {
     const { threads } = group;
     const cwd = group.rootPaths[0];
@@ -447,7 +569,7 @@ export default function App() {
           return [title(thread), date && `更新于：${date}`].filter(Boolean).join("\n");
         };
         return <div key={thread.id} className={`thread-row ${workbench.selected === thread.id ? "selected" : ""} ${busy ? "is-busy" : ""}`} aria-busy={busy}>
-          <button className={`thread-item ${workbench.selected === thread.id ? "selected" : ""}`} title={tooltip()} onMouseEnter={event => { event.currentTarget.title = tooltip(); }} onFocus={event => { event.currentTarget.title = tooltip(); }} disabled={!available || busy} onClick={() => { setError(""); void workbench.open(thread.id, archived); }}>
+          <button className={`thread-item ${workbench.selected === thread.id ? "selected" : ""}`} title={tooltip()} onMouseEnter={event => { event.currentTarget.title = tooltip(); }} onFocus={event => { event.currentTarget.title = tooltip(); }} disabled={!available || busy} onClick={() => { setError(""); setMobilePage("conversation"); void workbench.open(thread.id, archived); }}>
             <div className="thread-item-heading"><span className="thread-item-title">{title(thread)}</span>{!archived && thread.status?.type === "active" && <span className="thread-meta"><span className="status-dot connected" /></span>}</div>
           </button>
           <button className="icon-button thread-archive" title={reason || actionLabel} aria-label={`${actionLabel}：${title(thread)}`} disabled={!available || busy || !!reason} onClick={() => { setError(""); void workbench.changeArchive(thread, !archived); }}>{busy ? <Loader2 size={16} className="spin" /> : archived ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>
@@ -456,8 +578,9 @@ export default function App() {
     </div>;
   });
 
-  return <div className={`app-frame ${windowMaximized ? "is-maximized" : ""}`}>
-    <WindowTitlebar onError={setError} onMaximizedChange={setWindowMaximized} />
+  const composerSelectors = <div className="composer-selectors"><button type="button" className={`composer-mode ${workbench.mode === "plan" ? "is-plan" : ""}`} aria-pressed={workbench.mode === "plan"} disabled={!canCompose || (!planPreset && workbench.mode !== "plan")} title="Shift + Tab 切换计划模式" onClick={togglePlan}>{workbench.mode === "plan" ? "计划模式" : "默认模式"}</button>{workbench.serviceTier && workbench.serviceTier !== "default" && <span className="composer-tier">Fast</span>}<select aria-label="选择模型" title={selectedModel?.displayName || model || "主机默认模型"} value={model} disabled={!canCompose} onChange={event => { const chosen = workbench.models.find((m: Json) => (m.model || m.id) === event.target.value); setModel(event.target.value); setEffort(chosen?.defaultReasoningEffort || ""); }}><option value="">主机默认模型</option>{workbench.models.map((m: Json) => <option key={m.id || m.model} value={m.model || m.id}>{m.displayName || m.model || m.id}</option>)}</select>{!!efforts.length && <select aria-label="推理强度" value={effort} disabled={!canCompose} onChange={event => setEffort(event.target.value)}><option value="">默认强度</option>{efforts.map((e: Json) => <option key={e.reasoningEffort} value={e.reasoningEffort}>{EFFORT_LABELS[e.reasoningEffort] || e.reasoningEffort}</option>)}</select>}</div>;
+  return <div className={`app-frame ${windowMaximized ? "is-maximized" : ""} ${android ? "is-android" : ""} ${mobile ? "is-mobile view-" + mobilePage : ""}`}>
+    {!android && <WindowTitlebar onError={setError} onMaximizedChange={setWindowMaximized} />}
     <div className={`app-shell ${!sidebarExpanded ? "sidebar-collapsed" : ""}`}>
     <div className="device-slot" inert={modalOpen || inspectorDrawer}>
     <aside className={`device-sidebar ${sidebarOverlay ? "is-overlay" : ""}`} id="device-sidebar" ref={devicePanel} tabIndex={sidebarOverlay ? -1 : undefined} role={sidebarOverlay ? "dialog" : undefined} aria-modal={sidebarOverlay || undefined} aria-label="设备与设置">
@@ -466,23 +589,23 @@ export default function App() {
         <div className="sidebar-actions"><button className="icon-button" title="添加设备" aria-label="添加设备" onClick={() => setDialog("pair")}><Plus size={17} /></button>
         <button className="icon-button sidebar-toggle" title={sidebarExpanded ? "收起设备栏" : "展开设备栏"} aria-label={sidebarExpanded ? "收起设备栏" : "展开设备栏"} aria-expanded={sidebarExpanded} aria-controls="device-sidebar" onClick={toggleSidebar}>{sidebarExpanded ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}</button></div>
       </div>
-      <button className={`device-item ${local ? "selected" : ""}`} title={`${snapshot?.settings.identity.name || "这台电脑"} · ${desktop ? "本机 Codex" : "桌面预览"}`} aria-label={`${snapshot?.settings.identity.name || "这台电脑"}（本机）`} aria-pressed={local} onClick={() => { setDeviceId("local"); setSidebarOverlay(false); setError(""); }}><span className="device-icon"><Laptop size={19} /><span className={`status-dot device-status ${desktop && snapshot ? "connected" : ""}`} aria-hidden="true" /></span><span className="device-copy"><strong>{snapshot?.settings.identity.name || "这台电脑"}</strong></span></button>
+      {!android && snapshot?.capabilities.localExecution !== false && <button className={`device-item ${local ? "selected" : ""}`} title={`${snapshot?.settings.identity.name || "这台电脑"} · ${native ? "本机 Codex" : "桌面预览"}`} aria-label={`${snapshot?.settings.identity.name || "这台电脑"}（本机）`} aria-pressed={local} onClick={() => { setDeviceId("local"); setSidebarOverlay(false); setError(""); }}><span className="device-icon"><Laptop size={19} /><span className={`status-dot device-status ${native && snapshot ? "connected" : ""}`} aria-hidden="true" /></span><span className="device-copy"><strong>{snapshot?.settings.identity.name || "这台电脑"}</strong></span></button>}
       <div className="paired-devices">
-        {snapshot?.devices.map(device => <div className="device-row" key={device.id}><button className={`device-item ${deviceId === device.id ? "selected" : ""}`} title={`${device.peer?.name || "等待设备加入"} · ${stateLabels[device.state] || device.state}`} aria-label={`${device.peer?.name || "等待设备加入"} · ${stateLabels[device.state] || device.state}`} aria-pressed={deviceId === device.id} onClick={() => { setDeviceId(device.id); setSidebarOverlay(false); setError(""); if (device.state === "pending" && !device.approved) setDetailId(device.id); }}><span className="device-icon"><Monitor size={19} /><span className={`status-dot device-status ${device.state}`} aria-hidden="true" /></span><span className="device-copy"><strong>{device.peer?.name || "等待设备加入"}</strong>{(device.state !== "connected" || !device.peerSharing) && <small>{device.state === "connected" ? "共享已暂停" : stateLabels[device.state] || device.state}</small>}</span></button><button className="device-more icon-button" title="设备详情" aria-label={`${device.peer?.name || "设备"}详情`} onClick={() => setDetailId(device.id)}><MoreHorizontal size={16} /></button></div>)}
+        {snapshot?.devices.map(device => <div className="device-row" key={device.id}><button className={`device-item ${deviceId === device.id ? "selected" : ""}`} title={`${device.peer?.name || "等待设备加入"} · ${stateLabels[device.state] || device.state}`} aria-label={`${device.peer?.name || "等待设备加入"} · ${stateLabels[device.state] || device.state}`} aria-pressed={deviceId === device.id} onClick={() => { setDeviceId(device.id); setMobilePage("list"); setSidebarOverlay(false); setError(""); if (device.state === "pending" && !device.approved) setDetailId(device.id); }}><span className="device-icon"><Monitor size={19} /><span className={`status-dot device-status ${device.state}`} aria-hidden="true" /></span><span className="device-copy"><strong>{device.peer?.name || "等待设备加入"}</strong>{(device.state !== "connected" || !device.peerSharing) && <small>{device.state === "connected" ? "共享已暂停" : stateLabels[device.state] || device.state}</small>}</span></button><button className="device-more icon-button" title="设备详情" aria-label={`${device.peer?.name || "设备"}详情`} onClick={() => setDetailId(device.id)}><MoreHorizontal size={16} /></button></div>)}
       </div>
-      <div className="sidebar-bottom"><button className={`sidebar-footer-button sharing-toggle ${snapshot?.settings.sharing ? "is-sharing" : ""}`} role="switch" aria-checked={!!snapshot?.settings.sharing} aria-label="共享这台电脑" title={snapshot?.settings.sharing ? "本机共享已开启，点击暂停" : "本机共享已暂停，点击开启"} disabled={!desktop || !snapshot || sharingBusy} onClick={() => void toggleSharing()}><ShieldCheck size={18} /><span className="sidebar-footer-label">共享这台电脑</span><span className={`switch ${snapshot?.settings.sharing ? "on" : ""}`} aria-hidden="true"><span /></span></button><button className="sidebar-footer-button" title={`设置 (${modifier}+,)`} aria-label="设置" onClick={() => setDialog("settings")}><Settings2 size={18} /><span className="sidebar-footer-label">设置</span></button><button className={`sidebar-footer-button ${snapshot?.diagnostics.length ? "has-diagnostics" : ""}`} title={snapshot?.diagnostics.length ? `连接诊断：${snapshot.diagnostics.length} 条记录` : "连接诊断"} aria-label="连接诊断" onClick={() => setDialog("diagnostics")}><Activity size={18} /><span className="sidebar-footer-label">连接诊断</span><span className={`footer-meta ${snapshot?.diagnostics.length ? "diagnostic-count" : ""}`}>{snapshot?.diagnostics.length || ""}</span></button></div>
+      <div className="sidebar-bottom">{!android && snapshot?.capabilities.hostSharing !== false && <button className={`sidebar-footer-button sharing-toggle ${snapshot?.settings.sharing ? "is-sharing" : ""}`} role="switch" aria-checked={!!snapshot?.settings.sharing} aria-label="共享这台电脑" title={snapshot?.settings.sharing ? "本机共享已开启，点击暂停" : "本机共享已暂停，点击开启"} disabled={!native || !snapshot || sharingBusy} onClick={() => void toggleSharing()}><ShieldCheck size={18} /><span className="sidebar-footer-label">共享这台电脑</span><span className={`switch ${snapshot?.settings.sharing ? "on" : ""}`} aria-hidden="true"><span /></span></button>}<button className="sidebar-footer-button" title={`设置 (${modifier}+,)`} aria-label="设置" onClick={() => setDialog("settings")}><Settings2 size={18} /><span className="sidebar-footer-label">设置</span></button><button className={`sidebar-footer-button ${snapshot?.diagnostics.length ? "has-diagnostics" : ""}`} title={snapshot?.diagnostics.length ? `连接诊断：${snapshot.diagnostics.length} 条记录` : "连接诊断"} aria-label="连接诊断" onClick={() => setDialog("diagnostics")}><Activity size={18} /><span className="sidebar-footer-label">连接诊断</span><span className={`footer-meta ${snapshot?.diagnostics.length ? "diagnostic-count" : ""}`}>{snapshot?.diagnostics.length || ""}</span></button></div>
     </aside>
     </div>
     {sidebarOverlay && <div className="sidebar-backdrop" aria-hidden="true" onMouseDown={() => setSidebarOverlay(false)} />}
 
     <aside className="thread-sidebar" aria-label="会话列表" inert={modalOpen || sidebarOverlay || inspectorDrawer}>
-      <div className="thread-sidebar-top"><h1>会话</h1><div className="sidebar-actions"><button className="icon-button" aria-label="刷新会话" title="刷新会话" disabled={!available || workbench.loading || workbench.archivedLoading || workbench.opening} onClick={() => void workbench.refresh()}><RefreshCw size={16} /></button><button className="icon-button new-thread-button" aria-label="新建会话" title={`新建会话 (${modifier}+N)`} disabled={!available} onClick={() => beginNewThread()}><Plus size={20} /></button></div></div>
+      {mobile && <div className="mobile-device-toolbar"><button className="mobile-device-picker" onClick={() => setSidebarOverlay(true)}><span className={`status-dot ${available ? "connected" : ""}`} /><strong>{device?.peer?.name || (snapshot?.capabilities.localExecution ? deviceName : "选择电脑")}</strong><ChevronDown size={16} /></button><button className="icon-button" aria-label="设置" onClick={() => setDialog("settings")}><Settings2 size={20} /></button></div>}<div className="thread-sidebar-top"><h1>会话</h1><div className="sidebar-actions"><button className="icon-button" aria-label="刷新会话" title="刷新会话" disabled={!available || workbench.loading || workbench.archivedLoading || workbench.opening} onClick={() => void workbench.refresh()}><RefreshCw size={16} /></button><button className="icon-button new-thread-button" aria-label="新建会话" title={`新建会话 (${modifier}+N)`} disabled={!available} onClick={() => beginNewThread()}><Plus size={20} /></button></div></div>
       <div className="search-box"><Search size={15} /><input ref={searchInput} value={workbench.search} disabled={!available} placeholder="搜索会话" aria-label="搜索会话" title={`搜索会话 (${modifier}+K)`} onChange={event => workbench.setSearch(event.target.value)} /></div>
       {!!workbench.requests.length && <button className="approval-nav" onClick={() => { const id = workbench.requests[0].params?.threadId; if (id) void workbench.open(id); }}><ShieldCheck size={14} />{workbench.requests.length} 项待处理<ChevronRight size={13} /></button>}
       {workbench.projectsError && <div className="project-sync-error" role="status"><AlertCircle size={14} /><span>{workbench.projectsError}</span></div>}
       <div className="thread-list" aria-busy={workbench.loading || workbench.projectsLoading}>
         {renderProjectGroups(groupProjects, false)}
-        {!workbench.threads.length && !groupProjects.length && !workbench.loading && !workbench.projectsLoading && <div className="thread-list-empty">{!available ? "设备未连接" : workbench.search ? "没有匹配的会话" : "暂无会话"}</div>}
+        {!workbench.threads.length && !groupProjects.length && !workbench.loading && !workbench.projectsLoading && <div className="thread-list-empty">{!available ? deviceId ? "连接电脑后查看会话" : "添加电脑，随时继续工作" : workbench.search ? "没有匹配的会话" : "暂无会话"}{mobile && !available && <button className="primary" onClick={() => { setPairUri(""); setDialog("pair"); }}><Plus size={18} />添加设备</button>}</div>}
         {workbench.projectsLoading && !projects.length && <div className="list-loading"><Loader2 size={17} className="spin" />正在同步 Codex 项目…</div>}
         {workbench.loading && !workbench.threads.length && <div className="list-loading"><Loader2 size={17} className="spin" />正在读取会话…</div>}
         {workbench.nextCursor && <button className="load-older" disabled={!available || workbench.loading} onClick={() => void workbench.loadMore()}>加载更多会话</button>}
@@ -505,7 +628,7 @@ export default function App() {
 
     <main className="workspace" ref={workspace} inert={modalOpen || sidebarOverlay}>
       <header className="workspace-toolbar" data-tauri-drag-region inert={inspectorDrawer}>
-        <div className="toolbar-leading">{workbench.thread && <div className="toolbar-title"><strong title={title(workbench.thread)}>{title(workbench.thread)}</strong>{workbench.thread.cwd && <button className="toolbar-path" title={`复制项目路径：${workbench.thread.cwd}`} onClick={() => { void copy(workbench.thread!.cwd).catch(error => setError(message(error))); }}>{workbench.thread.cwd}</button>}</div>}</div>
+        <div className="toolbar-leading">{mobile && <button className="icon-button mobile-back" aria-label="返回会话列表" onClick={() => setMobilePage("list")}><ArrowLeft size={22} /></button>}{workbench.thread && <div className="toolbar-title"><strong title={title(workbench.thread)}>{title(workbench.thread)}</strong>{workbench.thread.cwd && <button className="toolbar-path" title={`复制项目路径：${workbench.thread.cwd}`} onClick={() => { void copy(workbench.thread!.cwd).catch(error => setError(message(error))); }}>{workbench.thread.cwd}</button>}</div>}</div>
         <div className="toolbar-trailing">
           {local ? <div className="execution-device" title={`当前执行电脑：${deviceName}（本机）`}><span className={`status-dot ${available ? "connected" : ""}`} /><Laptop size={13} /><span>{deviceName}</span></div> : <button className={`execution-device ${!available ? "is-offline" : ""}`} title={`当前执行电脑：${deviceName} · ${connectionLabel}，查看设备详情`} onClick={() => setDetailId(deviceId)}><span className={`status-dot ${available ? "connected" : ""}`} /><Monitor size={13} /><span>{deviceName}</span>{!available && <span className="execution-connection">{device?.state === "connected" ? "共享已暂停" : "已断开"}</span>}<ChevronDown size={12} /></button>}
           {workbench.thread && <button className="icon-button" aria-label="会话状态" title="会话状态" disabled={!available || !!workbench.commandBusy} onClick={() => { void executeSlash(commands.find(command => command.id === "status")!, true); }}><ShieldCheck size={18} /></button>}
@@ -513,7 +636,7 @@ export default function App() {
           <button className="icon-button" title="使用帮助" aria-label="使用帮助" onClick={() => setDialog("help")}><CircleHelp size={18} /></button>
         </div>
       </header>
-      {!desktop && <div className="preview-banner" inert={inspectorDrawer}><Monitor size={14} />桌面预览</div>}
+      {!native && <div className="preview-banner" inert={inspectorDrawer}><Monitor size={14} />桌面预览</div>}
       {error && <div className="error-banner" role="alert" inert={inspectorDrawer}><AlertCircle size={15} /><span>{error}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setError("")}><X size={14} /></button></div>}
       {["available", "downloading", "ready", "installing"].includes(updates.status.phase) && <div className="update-banner" role="status" inert={modalOpen || inspectorDrawer}><RefreshCw size={15} className={updates.status.phase === "downloading" || updates.status.phase === "installing" ? "spin" : ""} /><span>{updates.status.phase === "downloading" ? `正在下载 Relay 更新 · ${updateProgress(updates.status)}` : updates.status.phase === "ready" ? `Relay ${updates.status.version} 已准备好安装` : updates.status.phase === "installing" ? "正在安装 Relay 更新…" : `Relay ${updates.status.version} 可更新`}</span><button className="secondary small" onClick={() => setDialog("settings")}>查看更新</button></div>}
       <div className="workspace-content">
@@ -523,8 +646,9 @@ export default function App() {
             {workbench.historyError && <div className="session-banner history-warning" role="status"><AlertCircle size={15} /><div><p>{workbench.historyError}</p></div></div>}
             </div>
             <Transcript thread={workbench.thread} running={available && workbench.ready && !!workbench.activeTurn} older={() => void workbench.older()} hasOlder={!!workbench.olderCursor} loading={workbench.opening} offline={!available} onReference={openReference} onImplementPlan={canCompose && planPreset ? onImplementPlan : undefined} />
-            {workbench.ready && !workbench.opening && !!approvalForThread.length && <div className="approvals-container">{approvalForThread.map(request => <Approval request={request} key={request.id} deviceName={deviceName} resolve={workbench.resolve} />)}</div>}
-            {!workbench.thread.relayArchived && <div className="composer-container">{workbench.commandBusy && <div className="composer-command-status" role="status"><Loader2 size={14} className="spin" />{workbench.commandBusy}</div>}{workbench.thread.goal && <div className="composer-goal"><span><strong>目标 · {goalLabel(workbench.thread.goal.status)}</strong><small>{workbench.thread.goal.objective}</small></span><button className="secondary small" disabled={!canCompose} onClick={() => { void executeSlash(commands.find(command => command.id === "goal")!, true); }}>管理目标</button></div>}<MessageQueue items={workbench.queue} paused={workbench.queuePaused} available={canCompose} canEdit={!draft.length} onEdit={editQueued} onRemove={id => { workbench.removeQueued(id); }} onResume={workbench.resumeQueue} /><div className={`composer ${!canCompose ? "disabled" : ""}`}><MentionComposer key={key} device={deviceId} threadId={workbench.thread.relayDraft ? "" : workbench.selected || ""} cwd={workbench.thread.cwd || ""} deviceName={deviceName} enabled={canCompose && !modalOpen && !sidebarOverlay && !inspectorDrawer} draft={draftState} onChange={value => setDrafts(previous => ({ ...previous, [key]: value }))} inputRef={composer} commands={commands} commandError={promptCatalog.device === deviceId ? promptCatalog.error : undefined} onCommand={command => { void executeSlash(command); }} onTogglePlan={togglePlan} onSend={() => void send()} placeholder={canCompose ? queueing ? "添加待发消息…" : workbench.mode === "plan" ? "描述计划…" : "发送消息…" : workbench.commandBusy ? workbench.commandBusy : !available ? "离线草稿…" : workbench.opening ? "正在接续，可编辑草稿…" : workbench.resumeError ? "未接续，可编辑草稿…" : "草稿…"} /><div className="composer-bottom"><div className="composer-selectors"><button type="button" className={`composer-mode ${workbench.mode === "plan" ? "is-plan" : ""}`} aria-pressed={workbench.mode === "plan"} disabled={!canCompose || (!planPreset && workbench.mode !== "plan")} title="Shift + Tab 切换计划模式" onClick={togglePlan}>{workbench.mode === "plan" ? "计划模式" : "默认模式"}</button>{workbench.serviceTier && workbench.serviceTier !== "default" && <span className="composer-tier">Fast</span>}<select aria-label="选择模型" title={selectedModel?.displayName || model || "主机默认模型"} value={model} disabled={!canCompose} onChange={event => { const chosen = workbench.models.find((m: Json) => (m.model || m.id) === event.target.value); setModel(event.target.value); setEffort(chosen?.defaultReasoningEffort || ""); }}><option value="">主机默认模型</option>{workbench.models.map((m: Json) => <option key={m.id || m.model} value={m.model || m.id}>{m.displayName || m.model || m.id}</option>)}</select>{!!efforts.length && <select aria-label="推理强度" value={effort} disabled={!canCompose} onChange={event => setEffort(event.target.value)}><option value="">默认强度</option>{efforts.map((e: Json) => <option key={e.reasoningEffort} value={e.reasoningEffort}>{EFFORT_LABELS[e.reasoningEffort] || e.reasoningEffort}</option>)}</select>}</div><div className="composer-actions"><ContextUsage usage={workbench.thread.tokenUsage} />{workbench.activeTurn && <button className="stop-button" aria-label="停止当前回合" onClick={() => void workbench.stop()} disabled={!available || !workbench.ready || workbench.opening}><Square size={12} fill="currentColor" />停止</button>}<button className="send-button" aria-label={queueing ? "加入消息队列" : "发送消息"} title={queueing ? "加入队列 (Enter)" : "发送消息 (Enter)"} disabled={!canCompose || !draft.trim()} onClick={() => void send()}><ArrowUp size={19} /></button></div></div></div></div>}</> : workbench.selected && workbench.opening ? <div className="center-state"><Loader2 className="spin" size={26} /><p>正在读取会话…</p></div> : <div className="welcome">
+            {workbench.ready && !workbench.opening && !!approvalForThread.length && mobile && <button className="mobile-approval-prompt" onClick={() => setApprovalSheet(true)}><ShieldCheck size={19} /><span>{approvalForThread.length} 项待处理审批</span><ChevronRight size={18} /></button>}
+            {workbench.ready && !workbench.opening && !!approvalForThread.length && !mobile && <div className="approvals-container">{approvalForThread.map(request => <Approval request={request} key={request.id} deviceName={deviceName} resolve={workbench.resolve} />)}</div>}
+            {!workbench.thread.relayArchived && <div className="composer-container">{workbench.commandBusy && <div className="composer-command-status" role="status"><Loader2 size={14} className="spin" />{workbench.commandBusy}</div>}{workbench.thread.goal && <div className="composer-goal"><span><strong>目标 · {goalLabel(workbench.thread.goal.status)}</strong><small>{workbench.thread.goal.objective}</small></span><button className="secondary small" disabled={!canCompose} onClick={() => { void executeSlash(commands.find(command => command.id === "goal")!, true); }}>管理目标</button></div>}<MessageQueue items={workbench.queue} paused={workbench.queuePaused} available={canCompose} canEdit={editingQueue === null && !draft.length} onEdit={id => { void editQueued(id); }} onRemove={id => { void workbench.removeQueued(id); }} onResume={workbench.resumeQueue} /><div className={`composer ${!canCompose ? "disabled" : ""}`}><MentionComposer key={key} device={deviceId} threadId={workbench.thread.relayDraft ? "" : workbench.selected || ""} cwd={workbench.thread.cwd || ""} deviceName={deviceName} enabled={canCompose && !modalOpen && !sidebarOverlay && !inspectorDrawer} readOnly={editingQueue === key} draft={draftState} onChange={value => { if (editingQueueRef.current !== key) setDrafts(previous => ({ ...previous, [key]: value })); }} inputRef={composer} commands={commands} commandError={promptCatalog.device === deviceId ? promptCatalog.error : undefined} onCommand={command => { void executeSlash(command); }} onTogglePlan={togglePlan} onSend={() => void send()} placeholder={canCompose ? queueing ? "添加待发消息…" : workbench.mode === "plan" ? "描述计划…" : "发送消息…" : workbench.commandBusy ? workbench.commandBusy : !available ? "离线草稿…" : workbench.opening ? "正在接续，可编辑草稿…" : workbench.resumeError ? "未接续，可编辑草稿…" : "草稿…"} /><div className="composer-bottom">{!mobile ? composerSelectors : <button className="composer-option-trigger" disabled={!canCompose} onClick={() => setComposerOptions(true)}><span>{workbench.mode === "plan" ? "计划 · " : ""}{selectedModel?.displayName || model || "模型与模式"}</span><ChevronDown size={14} /></button>}<div className="composer-actions"><ContextUsage usage={workbench.thread.tokenUsage} />{workbench.activeTurn && <button className="stop-button" aria-label="停止当前回合" onClick={() => void workbench.stop()} disabled={!available || !workbench.ready || workbench.opening}><Square size={12} fill="currentColor" />停止</button>}<button className="send-button" aria-label={queueing ? "加入消息队列" : "发送消息"} title={queueing ? "加入队列 (Enter)" : "发送消息 (Enter)"} disabled={!canCompose || !draft.trim()} onClick={() => void send()}><ArrowUp size={19} /></button></div></div></div></div>}</> : workbench.selected && workbench.opening ? <div className="center-state"><Loader2 className="spin" size={26} /><p>正在读取会话…</p></div> : <div className="welcome">
               <div className="welcome-actions">
                 <button className="primary" disabled={!available || workbench.environment?.installed === false || signedOut} onClick={() => beginNewThread()}><Plus size={16} />新建会话</button>
               </div>
@@ -538,8 +662,10 @@ export default function App() {
         {inspector && <div className={`inspector-panel ${inspectorDrawer ? "is-drawer" : ""}`} ref={inspectorPanel} role={inspectorDrawer ? "dialog" : undefined} aria-modal={inspectorDrawer || undefined} aria-label={inspectorDrawer ? "文件变更检查器" : undefined} tabIndex={inspectorDrawer ? -1 : undefined}><Inspector thread={workbench.thread} close={() => setInspector(false)} /></div>}
       </div>
     </main>
+    {composerOptions && <Modal title="模型与模式" close={() => setComposerOptions(false)} footer={<button className="primary full" onClick={() => setComposerOptions(false)}>完成</button>}>{composerSelectors}</Modal>}
+    {approvalSheet && <Modal title="待处理审批" subtitle={deviceName} wide close={() => setApprovalSheet(false)}>{approvalForThread.map(request => <Approval request={request} key={request.id} deviceName={deviceName} resolve={workbench.resolve} />)}</Modal>}
     {commandDialog && <CommandDialog key={JSON.stringify([commandDialog.device, commandDialog.threadId, commandDialog.kind])} state={commandDialog} commands={commands} models={workbench.models} model={model} effort={effort} close={() => setCommandDialog(null)} apply={applyCommand} />}
-    {dialog === "pair" && <PairDialog snapshot={snapshot} close={() => setDialog(null)} changed={refresh} />}
+    {dialog === "pair" && <PairDialog initialUri={pairUri} snapshot={snapshot} close={() => setDialog(null)} changed={refresh} />}
     {dialog === "settings" && <SettingsDialog snapshot={snapshot} updates={updates} close={() => setDialog(null)} changed={async () => { await refresh(); workbench.refresh(); }} />}
     {dialog === "diagnostics" && <DiagnosticsDialog snapshot={snapshot} close={() => setDialog(null)} />}
     {dialog === "new" && <NewThreadDialog key={deviceId} projects={projects} deviceName={deviceName} close={() => setDialog(null)} create={createThread} />}

@@ -48,7 +48,7 @@ export function useFocusScope(
     const focusable = () => Array.from(ref.current?.querySelectorAll<HTMLElement>(
       'a[href], button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, [tabindex]:not([tabindex="-1"])',
     ) || []).filter(element => element.offsetParent !== null && !element.closest("[inert]"));
-    const focusFirst = () => (initialFocus?.current || focusable()[0] || ref.current)?.focus();
+    const focusFirst = () => (window.matchMedia("(pointer: coarse)").matches ? ref.current : initialFocus?.current || focusable()[0] || ref.current)?.focus();
     const frame = window.requestAnimationFrame(focusFirst);
     const handleKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return;

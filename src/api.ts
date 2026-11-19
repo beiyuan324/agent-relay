@@ -2,6 +2,8 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { messagePreview } from "./message-text";
 
+declare global { interface Window { __relayBack?: () => boolean } }
+
 export type Json = Record<string, any>;
 export interface Identity { id: string; name: string; platform: string }
 export interface Device {
@@ -15,17 +17,24 @@ export interface Settings {
 export interface Snapshot {
   settings: Settings; devices: Device[]; addresses: { name: string; url: string }[];
   diagnostics: string[]; listenerError: string | null;
+  capabilities: { localExecution: boolean; hostSharing: boolean; backgroundConnection: boolean };
 }
 export interface RelayEvent { type: "device" | "codex" | "diagnostic"; device?: Device | string; message?: Json | string }
-export const desktop = isTauri();
+export const native = isTauri();
+export const android = native && /Android/i.test(navigator.userAgent);
+export const desktop = native && !android;
+document.documentElement.dataset.platform = android ? "android" : "desktop";
 export async function command<T>(name: string, args: Json = {}): Promise<T> {
-  if (!desktop) throw new Error("请在 Relay 桌面应用中使用此功能。浏览器预览不连接本机或远端 Codex。");
+  if (!native) throw new Error("请在 Relay 应用中使用此功能。浏览器预览不连接本机或远端 Codex。");
   return invoke<T>(name, args);
 }
 export const call = <T = Json>(device: string, method: string, params: Json = {}) =>
   command<T>("codex_call", { device, method, params });
 export const subscribe = (handler: (event: RelayEvent) => void) =>
   listen<RelayEvent>("relay:event", event => handler(event.payload));
+export const subscribeQueue = (handler: (state: Json) => void) => listen<Json>("relay:queue", event => handler(event.payload));
+export const subscribeResume = (handler: (target: Json) => void) => listen<Json>("relay:resume", event => handler(event.payload));
+export const mobileAction = <T = Json>(action: string, value: Json = {}) => command<T>("mobile_action", { action, value });
 export function message(error: unknown) { return error instanceof Error ? error.message : String(error); }
 export const stateLabels: Record<string, string> = {
   connected: "已连接", pending: "等待配对确认", connecting: "正在连接", handshaking: "正在验证设备身份", waiting: "等待设备加入",

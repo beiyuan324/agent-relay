@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { version } from "../package.json";
-import { command, desktop, message } from "./api";
+import { command, native, message } from "./api";
 
 export interface UpdateStatus {
   revision: number;
@@ -18,7 +18,7 @@ const CHECK_INTERVAL = 6 * 60 * 60 * 1000;
 
 export function useUpdates() {
   const [status, setStatus] = useState<UpdateStatus>({
-    revision: 0, phase: desktop ? "idle" : "preview", currentVersion: version,
+    revision: 0, phase: native ? "idle" : "preview", currentVersion: version,
     version: null, notes: null, downloaded: 0, total: null, lastChecked: null, error: null,
   });
   const [pending, setPending] = useState(false);
@@ -30,7 +30,7 @@ export function useUpdates() {
     if (mounted.current) setStatus(previous => next.revision >= previous.revision ? next : previous);
   }, []);
   const run = useCallback(async (name: string) => {
-    if (!desktop || inFlight.current) return;
+    if (!native || inFlight.current) return;
     inFlight.current = true;
     setPending(true); setActionError("");
     try { apply(await command<UpdateStatus>(name)); }
@@ -43,7 +43,7 @@ export function useUpdates() {
 
   useEffect(() => {
     mounted.current = true;
-    if (!desktop) return;
+    if (!native) return;
     let stopped = false;
     let dispose: (() => void) | undefined;
     let startup: ReturnType<typeof setTimeout> | undefined;

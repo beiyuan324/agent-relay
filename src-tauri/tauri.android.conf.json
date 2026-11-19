@@ -1,0 +1,28 @@
+{
+  "identifier": "app.agentrelay.mobile",
+  "build": {
+    "devUrl": "http://localhost:1420"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Relay",
+        "fullscreen": false,
+        "backgroundColor": "#f7f8fa"
+      }
+    ]
+  },
+  "bundle": {
+    "targets": "all",
+    "createUpdaterArtifacts": false,
+    "android": {
+      "minSdkVersion": 26,
+      "debugApplicationIdSuffix": ".debug"
+    }
+  },
+  "plugins": {
+    "updater": null
+  }
+}

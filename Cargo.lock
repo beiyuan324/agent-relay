@@ -45,9 +45,10 @@ dependencies = [
 
 [[package]]
 name = "agent-relay"
-version = "0.0.10"
+version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jni 0.21.1",
  "keyring",
  "relay-core",
  "serde",
@@ -3528,7 +3529,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay-core"
-version = "0.0.10"
+version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3543,6 +3544,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -4937,6 +4939,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -5577,6 +5580,24 @@ name = "webpki-root-certs"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.12",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
 dependencies = [
  "rustls-pki-types",
 ]
