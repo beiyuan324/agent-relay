@@ -82,7 +82,7 @@ D5–D7 还核对了 `className`、DOM 类名操作和 Markdown 组件配置，�
 | Worker 默认 fetch 导出、RelayRoom、webSocketMessage/webSocketClose/alarm 等回调 | Wrangler 配置和平台按名称调用；不是普通显式调用图。 |
 | Rust `#[test]`/`#[tokio::test]` 函数 | 测试框架调用；单次文本出现不能证明未使用。 |
 | `cfg(windows)`、平台专用 keyring、托盘和 updater 发布模式路径 | 跨平台或不同构建模式使用，不因当前 Windows/debug 运行未执行而删除。 |
-| `public/relay-icon-*.png`、`docs/assets` 图标变体 | 设计源素材及可按 URL 访问的静态资源；应用导入图无法证明外部/人工用途已经结束。 |
+| `public/relay-icon.png`、`docs/assets/relay-icon-20-final` | 当前图标及定稿源素材；旧版图标和未选候选已在 0.1.3 清理。 |
 | `wrangler.toml` 的注释 routes 示例 | 部署指南让使用者复制配置并填写自定义域名，是操作模板而非废弃实现。 |
 | Worker 的 `workers_dev = false`、`preview_urls = false`、observability.enabled = false | 这些是部署行为设置；删除会改变默认行为，不是被关闭的冗余实现。 |
 | 默认关闭的共享状态、兼容旧版 Codex 的读取路径 | 共享可通过 UI 启用；兼容分支由外部主机版本/数据决定，不能证明永远不运行。 |

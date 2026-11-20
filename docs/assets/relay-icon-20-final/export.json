@@ -1,0 +1,21 @@
+{
+  "selection": 20,
+  "generator": "imagegen25 / gpt-image-2.5-flare",
+  "quality": "max",
+  "source_dimensions": [
+    1254,
+    1254
+  ],
+  "desktop": "relay-r-frosted-desktop.png",
+  "mobile_artwork_108dp_at_10x": "relay-r-frosted-mobile-1080.png",
+  "mobile_visible_window": [
+    180,
+    180,
+    900,
+    900
+  ],
+  "mobile_square": "relay-r-frosted-mobile-square.png",
+  "crop_preview": "relay-r-frosted-crop-preview.png",
+  "android_design_reference": "https://developer.android.com/develop/ui/compose/system/icon_design_adaptive",
+  "scope": "高清设计稿、移动端图稿及静态裁切预览；未打包或在设备启动器中运行。"
+}
