@@ -59,7 +59,7 @@ impl Host {
                     _ = host.cancel.cancelled()=>break,
                     event = events.recv()=>match event {
                         Ok(message)=>{host.codex_event("local".into(),message);},
-                        Err(broadcast::error::RecvError::Lagged(_))=>{let _=host.events.send(AppEvent::Diagnostic{message:"本机事件过快，请刷新会话以同步历史".into()});},
+                        Err(broadcast::error::RecvError::Lagged(_))=>{let _=host.events.send(AppEvent::Diagnostic{message:"本机事件过快，请刷新会话以同步历史".into(),device:None});},
                         Err(_)=>break,
                     }
                 }
@@ -77,7 +77,7 @@ impl Host {
             Err(_) => {
                 let message = format!("局域网端口 {port} 无法监听。请关闭占用程序后重启 Relay，异地连接仍可使用。");
                 *self.listener_error.write().await = Some(message.clone());
-                let _ = self.events.send(AppEvent::Diagnostic { message: message.clone() });
+                let _ = self.events.send(AppEvent::Diagnostic { message: message.clone(), device: None });
                 bail!(message);
             }
         };
@@ -191,10 +191,10 @@ impl Host {
         let mut view=peer.view.write().await;
         let changed=view.state!=state || view.error!=error;
         view.state=state.into();view.error=error;
-        let diagnostic=if changed{view.error.as_ref().map(|error|format!("配对 {}：{error}",view.id))}else{None};
+        let diagnostic=if changed{view.error.as_ref().map(|error|(view.id.clone(),format!("配对 {}：{error}",view.id)))}else{None};
         let _=self.events.send(AppEvent::Device{device:view.clone()});
         drop(view);
-        if let Some(message)=diagnostic{let _=self.events.send(AppEvent::Diagnostic{message});}
+        if let Some((device,message))=diagnostic{let _=self.events.send(AppEvent::Diagnostic{message,device:Some(device)});}
     }
     async fn publish(&self,peer:&Peer) {let _=self.events.send(AppEvent::Device{device:peer.view.read().await.clone()});}
     async fn session(self:Arc<Self>,peer:Arc<Peer>,mut transport:Transport,initiator:bool) {

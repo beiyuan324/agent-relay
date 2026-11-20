@@ -4,6 +4,7 @@ import android.app.Activity
 import android.view.ViewGroup
 import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
+import androidx.core.graphics.Insets
 import androidx.core.view.*
 import app.tauri.plugin.Plugin
 import app.tauri.annotation.TauriPlugin
@@ -16,15 +17,13 @@ class RelayPlugin(private val host: Activity) : Plugin(host) {
         val activity = host as MainActivity
         activity.web = WeakReference(webView)
         ViewCompat.setOnApplyWindowInsetsListener(activity.window.decorView) { _, insets ->
+            // 此处已收到键盘动画的最终尺寸，不再逐帧改写边距。
             applyInsets(webView, insets)
-            insets
+            // 保留 Insets 更新分发，但不让 WebView 重复避让原生已处理的区域。
+            WindowInsetsCompat.Builder(insets)
+                .setInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime(), Insets.NONE)
+                .build()
         }
-        ViewCompat.setWindowInsetsAnimationCallback(activity.window.decorView, object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
-            override fun onProgress(insets: WindowInsetsCompat, runningAnimations: MutableList<WindowInsetsAnimationCompat>): WindowInsetsCompat {
-                applyInsets(webView, insets)
-                return insets
-            }
-        })
         ViewCompat.requestApplyInsets(activity.window.decorView)
         activity.onBackPressedDispatcher.addCallback(activity, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {

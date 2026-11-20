@@ -19,7 +19,7 @@ fn report(app: &AppHandle, message: String) {
         if let Some(state) = app.try_state::<Arc<Desktop>>() {
             state.diagnostic(message.clone()).await;
         }
-        let _ = app.emit("relay:event", AppEvent::Diagnostic { message });
+        let _ = app.emit("relay:event", AppEvent::Diagnostic { message, device: None });
     });
 }
 

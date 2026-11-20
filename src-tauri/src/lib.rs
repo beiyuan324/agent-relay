@@ -140,11 +140,11 @@ async fn initialize(path:PathBuf)->Result<Arc<Desktop>> {
                     let _guard=event_state.mutation.lock().await;
                     if let Err(error)=event_state.save().await {
                         let message=error.to_string();event_state.diagnostic(message.clone()).await;
-                        emit("relay:event",AppEvent::Diagnostic{message});
+                        emit("relay:event",AppEvent::Diagnostic{message,device:None});
                     }
                 },
                 Ok(event)=>{
-                    if let AppEvent::Diagnostic{message}=&event { event_state.diagnostic(message.clone()).await; }
+                    if let AppEvent::Diagnostic{message,..}=&event { event_state.diagnostic(message.clone()).await; }
                     if let AppEvent::Device{device}=&event {
                         if device.state=="pending" && !device.approved && device.peer.is_some() && prompted_pairs.insert(device.id.clone()) {
                             #[cfg(not(target_os="android"))]
@@ -158,7 +158,7 @@ async fn initialize(path:PathBuf)->Result<Arc<Desktop>> {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{
                     let message="事件流需要重新同步，请刷新当前会话".to_string();
                     event_state.diagnostic(message.clone()).await;
-                    emit("relay:event",AppEvent::Diagnostic{message});
+                    emit("relay:event",AppEvent::Diagnostic{message,device:None});
                 },
                 Err(_)=>break,
             }

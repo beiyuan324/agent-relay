@@ -136,7 +136,7 @@ impl Workbench {
         }
     }
     fn report(&self, error: anyhow::Error) {
-        let _ = self.host.events.send(AppEvent::Diagnostic { message: error.to_string() });
+        let _ = self.host.events.send(AppEvent::Diagnostic { message: error.to_string(), device: None });
     }
     fn publish(&self, state: &mut State) -> Result<()> {
         state.snapshot.revision += 1;

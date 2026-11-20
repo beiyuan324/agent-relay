@@ -53,7 +53,7 @@ export default function App() {
   const [reference, setReference] = useState<MessageReference | null>(null);
   const [referenceCopied, setReferenceCopied] = useState(false);
   const promptedPairs = useRef(new Set<string>());
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string | { device: string; message: string }>("");
   const [booting, setBooting] = useState(native);
   const [inspector, setInspector] = useState(false);
   const [windowMaximized, setWindowMaximized] = useState(false);
@@ -95,6 +95,11 @@ export default function App() {
   const device = snapshot?.devices.find(device => device.id === deviceId);
   const local = deviceId === "local";
   const available = native && !!snapshot && ((local && snapshot.capabilities.localExecution) || (device?.state === "connected" && device.peerSharing));
+  const errorDevice = typeof error === "string" ? undefined : snapshot?.devices.find(device => device.id === error.device);
+  const errorText = typeof error === "string" ? error : errorDevice?.state === "connected" ? "" : error.message;
+  useEffect(() => {
+    if (typeof error !== "string" && errorDevice?.state === "connected") setError(previous => previous === error ? "" : previous);
+  }, [error, errorDevice?.state]);
   const deviceName = local ? snapshot?.settings.identity.name || "这台电脑" : device?.peer?.name || "另一台电脑";
   const availableDevices = useMemo(() => new Set<string>(native && snapshot ? [...(snapshot.capabilities.localExecution ? ["local"] : []), ...snapshot.devices.filter(device => device.state === "connected" && device.peerSharing).map(device => device.id)] : []), [snapshot]);
   const workbench = useWorkbench(deviceId, available, setError, availableDevices);
@@ -143,7 +148,7 @@ export default function App() {
           setSnapshot(previous => previous ? { ...previous, devices: [...previous.devices.filter(d => d.id !== device.id), device] } : previous);
         } else if (event.type === "diagnostic" && typeof event.message === "string") {
           const text = event.message;
-          setError(text);
+          setError(typeof event.device === "string" ? { device: event.device, message: text } : text);
           setSnapshot(previous => previous ? { ...previous, diagnostics: [...previous.diagnostics.slice(-99), text] } : previous);
         } else relayEvent.current(event);
       });
@@ -637,7 +642,7 @@ export default function App() {
         </div>
       </header>
       {!native && <div className="preview-banner" inert={inspectorDrawer}><Monitor size={14} />桌面预览</div>}
-      {error && <div className="error-banner" role="alert" inert={inspectorDrawer}><AlertCircle size={15} /><span>{error}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setError("")}><X size={14} /></button></div>}
+      {errorText && <div className="error-banner" role="alert" inert={inspectorDrawer}><AlertCircle size={15} /><span>{errorText}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setError("")}><X size={14} /></button></div>}
       {["available", "downloading", "ready", "installing"].includes(updates.status.phase) && <div className="update-banner" role="status" inert={modalOpen || inspectorDrawer}><RefreshCw size={15} className={updates.status.phase === "downloading" || updates.status.phase === "installing" ? "spin" : ""} /><span>{updates.status.phase === "downloading" ? `正在下载 Relay 更新 · ${updateProgress(updates.status)}` : updates.status.phase === "ready" ? `Relay ${updates.status.version} 已准备好安装` : updates.status.phase === "installing" ? "正在安装 Relay 更新…" : `Relay ${updates.status.version} 可更新`}</span><button className="secondary small" onClick={() => setDialog("settings")}>查看更新</button></div>}
       <div className="workspace-content">
         <div className="conversation-column" inert={inspectorDrawer}>

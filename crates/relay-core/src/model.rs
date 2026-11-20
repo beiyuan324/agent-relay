@@ -67,7 +67,7 @@ impl From<&PairConfig> for DeviceView {
 pub enum AppEvent {
     Device { device: DeviceView },
     Codex { device: String, message: Value },
-    Diagnostic { message: String },
+    Diagnostic { message: String, #[serde(default, skip_serializing_if = "Option::is_none")] device: Option<String> },
     Persist,
 }
 #[derive(Clone, Serialize, Deserialize)]
