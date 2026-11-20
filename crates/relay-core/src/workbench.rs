@@ -181,6 +181,8 @@ impl Workbench {
         ensure!(item.draft["text"].as_str().is_some_and(|text| !text.trim().is_empty()) && !item.input.is_empty(), "消息不能为空");
         ensure!(item.collaboration_mode.is_none() || !item.model.is_empty(), "请选择模型后再使用协作模式");
         let mut state = self.state.lock().await;
+        let thread = state.snapshot.created.get(&key(&device, &id)).map(|created| created["thread"].clone()).unwrap_or(thread);
+        let id = thread["id"].as_str().ok_or_else(|| anyhow!("缺少会话标识"))?.to_owned();
         let queue_key = key(&device, &id);
         let previous=state.snapshot.clone();
         let queue = state.snapshot.queues.entry(queue_key).or_insert_with(|| Queue { device, thread_id: id, thread, ..Queue::default() });
@@ -245,7 +247,7 @@ impl Workbench {
     pub async fn pause_all(&self, reason: &str) -> Result<()> {
         let mut state = self.state.lock().await;
         for queue in state.snapshot.queues.values_mut() { queue.paused = Some(reason.into()); }
-        for session in state.sessions.values_mut() { session.synced = false; session.epoch += 1; }
+        for session in state.sessions.values_mut() { session.synced = false; session.running = false; session.blocked = false; session.epoch += 1; }
         self.publish(&mut state)
     }
     async fn next(&self) -> Option<Queue> {
@@ -268,7 +270,7 @@ impl Workbench {
                         let _ = queue_key;
                     }
                     for (queue_key, session) in &mut state.sessions {
-                        if serde_json::from_str::<Vec<String>>(queue_key).is_ok_and(|keys| keys[0] == device.id) { session.synced = false; session.epoch += 1; }
+                        if serde_json::from_str::<Vec<String>>(queue_key).is_ok_and(|keys| keys[0] == device.id) { session.synced = false; session.running = false; session.blocked = false; session.epoch += 1; }
                     }
                 }
             },

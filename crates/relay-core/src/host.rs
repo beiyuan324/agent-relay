@@ -28,7 +28,7 @@ pub struct Host {
     #[cfg(feature = "local-executor")]
     pub codex: Arc<Codex>,
     local_events: broadcast::Sender<Value>,
-    listening: AtomicBool,
+    listening: Mutex<bool>,
     active: AtomicBool,
     network: tokio::sync::Notify,
     pub events: broadcast::Sender<AppEvent>,
@@ -48,7 +48,7 @@ impl Host {
         let local_events = codex.events.clone();
         #[cfg(not(feature = "local-executor"))]
         let (local_events, _) = broadcast::channel(16);
-        Arc::new(Self { #[cfg(feature = "local-executor")] codex, local_events, listening: AtomicBool::new(false), active: AtomicBool::new(true), network: tokio::sync::Notify::new(), events, event_sequence: AtomicU64::new(0),settings:RwLock::new(settings),peers:RwLock::new(HashMap::new()),cancel:CancellationToken::new(),listener_error:RwLock::new(None),operations:Arc::new(RwLock::new(()))})
+        Arc::new(Self { #[cfg(feature = "local-executor")] codex, local_events, listening: Mutex::new(false), active: AtomicBool::new(true), network: tokio::sync::Notify::new(), events, event_sequence: AtomicU64::new(0),settings:RwLock::new(settings),peers:RwLock::new(HashMap::new()),cancel:CancellationToken::new(),listener_error:RwLock::new(None),operations:Arc::new(RwLock::new(()))})
     }
     pub async fn start(self: &Arc<Self>) {
         let host = self.clone();
@@ -66,18 +66,25 @@ impl Host {
             }
         });
         #[cfg(not(target_os = "android"))]
-        self.start_listener().await;
+        let _ = self.start_listener().await;
     }
-    pub async fn start_listener(self: &Arc<Self>) {
-        if self.listening.swap(true, Ordering::AcqRel) { return; }
+    pub async fn start_listener(self: &Arc<Self>) -> Result<()> {
+        let mut listening = self.listening.lock().await;
+        if *listening { return Ok(()); }
+        let port = self.settings.read().await.listen_port;
+        let listener = match TcpListener::bind(("0.0.0.0", port)).await {
+            Ok(listener) => listener,
+            Err(_) => {
+                let message = format!("局域网端口 {port} 无法监听。请关闭占用程序后重启 Relay，异地连接仍可使用。");
+                *self.listener_error.write().await = Some(message.clone());
+                let _ = self.events.send(AppEvent::Diagnostic { message: message.clone() });
+                bail!(message);
+            }
+        };
+        *self.listener_error.write().await = None;
+        *listening = true;
         let host=self.clone();
         tokio::spawn(async move {
-            let port=host.settings.read().await.listen_port;
-            let listener=match TcpListener::bind(("0.0.0.0",port)).await {
-                Ok(listener)=>listener,
-                Err(_)=>{let message=format!("局域网端口 {port} 无法监听。请关闭占用程序后重启 Relay，异地连接仍可使用。");host.listening.store(false, Ordering::Release);*host.listener_error.write().await=Some(message.clone());let _=host.events.send(AppEvent::Diagnostic{message});return;}
-            };
-            *host.listener_error.write().await=None;
             loop {
                 let accepted=tokio::select!{_=host.cancel.cancelled()=>break,result=listener.accept()=>result};
                 let Ok((stream,_))=accepted else {continue};
@@ -101,6 +108,7 @@ impl Host {
                 });
             }
         });
+        Ok(())
     }
     pub async fn add(self:&Arc<Self>, config:PairConfig, code:String) -> Result<()> {
         ensure!(!self.peers.read().await.contains_key(&config.id),"此设备邀请已经添加");

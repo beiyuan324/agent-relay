@@ -180,7 +180,7 @@ async fn initialize(path:PathBuf)->Result<Arc<Desktop>> {
     host.start().await;
     #[cfg(target_os="android")]
     if devices.iter().any(|config| config.mode==ConnectionMode::Lan && config.role==relay_core::Role::Responder) {
-        if mobile::call("lanStatus",Value::Null)?==true { host.start_listener().await; }
+        if mobile::call("lanStatus",Value::Null)?==true { let _ = host.start_listener().await; }
         else { state.diagnostic("局域网访问权限未开启，请打开设备详情授权并重新连接".into()).await; }
     }
     for config in devices {
@@ -225,8 +225,7 @@ async fn create_invitation(state:State<'_,Arc<Desktop>>,endpoint:String,mode:Con
     if mode==ConnectionMode::Lan {ensure_lan_permission().await?;}
     let _guard=state.mutation.lock().await;
     if mode==ConnectionMode::Lan {
-        state.host.start_listener().await;
-        if let Some(error)=state.host.listener_error().await{return Err(error);}
+        state.host.start_listener().await.map_err(error)?;
     }
     if state.host.views().await.len()>=32{return Err("最多保存 32 对设备，请先移除不用的邀请".into());}
     let (config,code,uri)=relay::create_invitation(&endpoint,mode).map_err(error)?;
@@ -260,7 +259,7 @@ async fn reconnect_device(state:State<'_,Arc<Desktop>>,id:String)->Result<(),Str
     let _guard=state.mutation.lock().await;
     if state.host.views().await.iter().any(|device|device.id==id && device.mode==ConnectionMode::Lan){
         ensure_lan_permission().await?;
-        if state.host.snapshot().await.devices.iter().any(|config|config.id==id && config.role==relay_core::Role::Responder) { state.host.start_listener().await; }
+        if state.host.snapshot().await.devices.iter().any(|config|config.id==id && config.role==relay_core::Role::Responder) { state.host.start_listener().await.map_err(error)?; }
     }
     state.host.reconnect(&id).await.map_err(error)?;state.save().await.map_err(error)
 }

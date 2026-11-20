@@ -24,7 +24,7 @@ object RelayNative {
     init { System.loadLibrary("agent_relay_lib") }
     lateinit var context: Context
     var activity = WeakReference<MainActivity>(null)
-    @Volatile var foreground = true
+    @Volatile var foreground = false
     @Volatile var launchTarget = "{}"
     private val handler = Handler(Looper.getMainLooper())
     private val preferences get() = context.getSharedPreferences("relay", Context.MODE_PRIVATE)

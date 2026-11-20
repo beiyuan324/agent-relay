@@ -7,7 +7,7 @@ use tauri::plugin::{Builder, TauriPlugin};
 
 static VM: OnceLock<JavaVM> = OnceLock::new();
 static CLASS: OnceLock<GlobalRef> = OnceLock::new();
-static FOREGROUND: AtomicBool = AtomicBool::new(true);
+static FOREGROUND: AtomicBool = AtomicBool::new(false);
 pub fn foreground() -> bool { FOREGROUND.load(Ordering::Acquire) }
 
 pub fn init() -> TauriPlugin<tauri::Wry> {
@@ -79,6 +79,7 @@ pub extern "system" fn Java_app_agentrelay_mobile_RelayNative_sendEvent(mut env:
 pub extern "system" fn Java_app_agentrelay_mobile_RelayNative_networkChanged(_: JNIEnv, _: JClass) {
     if let Some(state) = super::RUNTIME.get().cloned() {
         tauri::async_runtime::spawn(async move {
+            let _guard = state.mutation.lock().await;
             for device in state.host.views().await {
                 if !matches!(device.state.as_str(),"pending"|"replaced"|"credentialMissing"|"waiting") {
                     if let Err(error)=state.host.reconnect(&device.id).await { state.diagnostic(error.to_string()).await; }
