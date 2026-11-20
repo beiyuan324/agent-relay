@@ -211,6 +211,7 @@ export default function App() {
     }
   }, [workbench.permissions, workbench.models]);
 
+  const searching = !!workbench.search.trim();
   const groupProjects = useMemo(() => groupProjectThreads(workbench.threads, workbench.projectCatalog, workbench.search), [workbench.threads, workbench.projectCatalog, workbench.search]);
   const archivedGroups = useMemo(() => groupProjectThreads(workbench.archivedThreads, workbench.projectCatalog, workbench.search).filter(group => group.threads.length), [workbench.archivedThreads, workbench.projectCatalog, workbench.search]);
   const projects = workbench.projectCatalog.data;
@@ -556,16 +557,24 @@ export default function App() {
     const cwd = group.rootPaths[0];
     const key = projectKey(deviceId, archived ? `archived:${group.id}` : group.id);
     const savedCollapse = collapsedProjects[key] ?? (!archived && group.rootPaths.some(root => collapsedProjects[projectKey(deviceId, root)]));
-    const collapsed = !!savedCollapse && !workbench.search.trim();
+    const collapsed = !searching && !!savedCollapse;
     const listId = `project-${encodeURIComponent(key)}`;
+    const projectTitle = group.rootPaths.length ? `${group.name}\n${group.rootPaths.join("\n")}` : "未归属于 Codex 项目的会话";
+    const projectName = <><Folder size={13} aria-hidden="true" /><span className="project-name">{group.name}</span></>;
     return <div className="project-group" key={group.id}>
       <div className="project-heading">
-        <button className="project-toggle" title={group.rootPaths.length ? `${group.name}\n${group.rootPaths.join("\n")}` : "未归属于 Codex 项目的会话"} aria-expanded={!collapsed} aria-controls={listId} onClick={() => setCollapsedProjects(previous => { const next = { ...previous, [key]: !collapsed }; if (!archived) for (const root of group.rootPaths) delete next[projectKey(deviceId, root)]; return next; })}>
-          <ChevronRight size={12} className={collapsed ? "" : "expanded"} /><Folder size={13} /><span className="project-name">{group.name}</span>
-        </button>
+        {searching ? <h2 className="project-title" title={projectTitle}>{projectName}</h2> : (
+          <button className="project-toggle" title={projectTitle} aria-expanded={!collapsed} aria-controls={listId} onClick={() => setCollapsedProjects(previous => {
+            const next = { ...previous, [key]: !collapsed };
+            if (!archived) for (const root of group.rootPaths) delete next[projectKey(deviceId, root)];
+            return next;
+          })}>
+            <ChevronRight size={12} className={collapsed ? "" : "expanded"} aria-hidden="true" />{projectName}
+          </button>
+        )}
         {!archived && group.project && cwd && <button className="icon-button project-new" title={!group.project.native ? "此版本 Codex 不支持保存原生项目归属，请升级后新建会话" : creatingProjectKey === key ? "正在创建会话…" : `在 ${group.name} 中新建会话`} aria-label={`在 ${group.name} 中新建会话`} aria-busy={creatingProjectKey === key} disabled={!available || creatingProjectKey !== null || !group.project.native || workbench.environment?.installed === false || signedOut} onClick={() => { setError(""); void createThread(cwd, group.project).catch(error => setError(message(error))); }}>{creatingProjectKey === key ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}</button>}
       </div>
-      <div id={listId} hidden={collapsed}>{threads.map(thread => {
+      <div className="project-children" id={listId} hidden={collapsed}>{threads.map(thread => {
         const busy = workbench.isArchiveBusy(thread.id);
         const reason = archived ? "" : workbench.archiveReason(thread);
         const actionLabel = archived ? "恢复会话" : "归档会话";
@@ -579,7 +588,7 @@ export default function App() {
           </button>
           <button className="icon-button thread-archive" title={reason || actionLabel} aria-label={`${actionLabel}：${title(thread)}`} disabled={!available || busy || !!reason} onClick={() => { setError(""); void workbench.changeArchive(thread, !archived); }}>{busy ? <Loader2 size={16} className="spin" /> : archived ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>
         </div>;
-      })}{!threads.length && <div className="project-empty">{workbench.search ? "没有匹配的会话" : (archived ? workbench.archivedNextCursor : workbench.nextCursor) ? "更多会话尚未加载" : "暂无会话"}</div>}</div>
+      })}{!threads.length && <div className="project-empty">{searching ? "没有匹配的会话" : (archived ? workbench.archivedNextCursor : workbench.nextCursor) ? "更多会话尚未加载" : "暂无会话"}</div>}</div>
     </div>;
   });
 
@@ -604,13 +613,31 @@ export default function App() {
     {sidebarOverlay && <div className="sidebar-backdrop" aria-hidden="true" onMouseDown={() => setSidebarOverlay(false)} />}
 
     <aside className="thread-sidebar" aria-label="会话列表" inert={modalOpen || sidebarOverlay || inspectorDrawer}>
-      {mobile && <div className="mobile-device-toolbar"><button className="mobile-device-picker" onClick={() => setSidebarOverlay(true)}><span className={`status-dot ${available ? "connected" : ""}`} /><strong>{device?.peer?.name || (snapshot?.capabilities.localExecution ? deviceName : "选择电脑")}</strong><ChevronDown size={16} /></button><button className="icon-button" aria-label="设置" onClick={() => setDialog("settings")}><Settings2 size={20} /></button></div>}<div className="thread-sidebar-top"><h1>会话</h1><div className="sidebar-actions"><button className="icon-button" aria-label="刷新会话" title="刷新会话" disabled={!available || workbench.loading || workbench.archivedLoading || workbench.opening} onClick={() => void workbench.refresh()}><RefreshCw size={16} /></button><button className="icon-button new-thread-button" aria-label="新建会话" title={`新建会话 (${modifier}+N)`} disabled={!available} onClick={() => beginNewThread()}><Plus size={20} /></button></div></div>
+      <div className="thread-sidebar-top">
+        {mobile ? <button className="mobile-device-picker" aria-expanded={sidebarOverlay} aria-controls="device-sidebar" onClick={() => setSidebarOverlay(true)}>
+          <span className={`status-dot ${available ? "connected" : ""}`} aria-hidden="true" />
+          <strong>{device?.peer?.name || (snapshot?.capabilities.localExecution ? deviceName : "选择电脑")}</strong>
+          <ChevronDown size={16} aria-hidden="true" />
+        </button> : <h1>会话</h1>}
+        <div className="sidebar-actions">
+          <button className="icon-button" aria-label="刷新会话" title="刷新会话" disabled={!available || workbench.loading || workbench.archivedLoading || workbench.opening} onClick={() => void workbench.refresh()}><RefreshCw size={16} /></button>
+          {mobile && <button className="icon-button" aria-label="设置" onClick={() => setDialog("settings")}><Settings2 size={20} /></button>}
+          <button className="icon-button new-thread-button" aria-label="新建会话" title={`新建会话 (${modifier}+N)`} disabled={!available} onClick={() => beginNewThread()}><Plus size={20} /></button>
+        </div>
+      </div>
       <div className="search-box"><Search size={15} /><input ref={searchInput} value={workbench.search} disabled={!available} placeholder="搜索会话" aria-label="搜索会话" title={`搜索会话 (${modifier}+K)`} onChange={event => workbench.setSearch(event.target.value)} /></div>
-      {!!workbench.requests.length && <button className="approval-nav" onClick={() => { const id = workbench.requests[0].params?.threadId; if (id) void workbench.open(id); }}><ShieldCheck size={14} />{workbench.requests.length} 项待处理<ChevronRight size={13} /></button>}
+      {!!workbench.requests.length && <button className="approval-nav" disabled={!available} onClick={() => {
+        const threadId = workbench.requests[0].params?.threadId;
+        setError("");
+        if (threadId) {
+          setMobilePage("conversation");
+          void workbench.open(threadId);
+        } else setApprovalSheet(true);
+      }}><ShieldCheck size={14} />{workbench.requests.length} 项待处理<ChevronRight size={13} /></button>}
       {workbench.projectsError && <div className="project-sync-error" role="status"><AlertCircle size={14} /><span>{workbench.projectsError}</span></div>}
       <div className="thread-list" aria-busy={workbench.loading || workbench.projectsLoading}>
         {renderProjectGroups(groupProjects, false)}
-        {!workbench.threads.length && !groupProjects.length && !workbench.loading && !workbench.projectsLoading && <div className="thread-list-empty">{!available ? deviceId ? "连接电脑后查看会话" : "添加电脑，随时继续工作" : workbench.search ? "没有匹配的会话" : "暂无会话"}{mobile && !available && <button className="primary" onClick={() => { setPairUri(""); setDialog("pair"); }}><Plus size={18} />添加设备</button>}</div>}
+        {!workbench.threads.length && !groupProjects.length && !workbench.loading && !workbench.projectsLoading && <div className="thread-list-empty">{!available ? deviceId ? "连接电脑后查看会话" : "添加电脑，随时继续工作" : searching ? "没有匹配的会话" : "暂无会话"}{mobile && !available && <button className="primary" onClick={() => { setPairUri(""); setDialog("pair"); }}><Plus size={18} />添加设备</button>}</div>}
         {workbench.projectsLoading && !projects.length && <div className="list-loading"><Loader2 size={17} className="spin" />正在同步 Codex 项目…</div>}
         {workbench.loading && !workbench.threads.length && <div className="list-loading"><Loader2 size={17} className="spin" />正在读取会话…</div>}
         {workbench.nextCursor && <button className="load-older" disabled={!available || workbench.loading} onClick={() => void workbench.loadMore()}>加载更多会话</button>}
@@ -624,7 +651,7 @@ export default function App() {
             {renderProjectGroups(archivedGroups, true)}
             {workbench.archivedLoading && !workbench.archivedThreads.length && <div className="list-loading"><Loader2 size={16} className="spin" />正在读取已归档会话…</div>}
             {workbench.archivedError && <div className="archive-list-error" role="status"><p>{workbench.archivedError}</p><button className="text-button" disabled={!available || workbench.archivedLoading} onClick={() => void workbench.retryArchived()}><RefreshCw size={13} />重试读取</button></div>}
-            {!workbench.archivedThreads.length && !workbench.archivedLoading && !workbench.archivedError && <div className="archive-list-empty">{!available ? "连接设备后可查看归档会话。" : workbench.search ? "没有匹配的已归档会话。" : "暂无已归档会话。"}</div>}
+            {!workbench.archivedThreads.length && !workbench.archivedLoading && !workbench.archivedError && <div className="archive-list-empty">{!available ? "连接设备后可查看归档会话。" : searching ? "没有匹配的已归档会话。" : "暂无已归档会话。"}</div>}
             {workbench.archivedNextCursor && <button className="load-older" disabled={!available || workbench.archivedLoading} onClick={() => void workbench.loadMoreArchived()}>加载更多已归档会话</button>}
           </>}
         </div>

@@ -22,11 +22,11 @@ function ReferenceLink({ href, label, children }: MessageReference & { children?
 function linkedText(text: string, key: string): ReactNode[] {
   return messageLinks(text).map((part, index) => typeof part === "string" ? part : <ReferenceLink key={key + ":" + index} {...part} />);
 }
-function Markdown({ text }: { text: string }) {
+const Markdown = memo(function Markdown({ text }: { text: string }) {
   return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml
     urlTransform={url => referenceKind(url) ? url : defaultUrlTransform(url)}
     components={{ a: ({ children, href }) => <ReferenceLink href={href || ""} label={typeof children === "string" ? children : href || "引用"}>{children}</ReferenceLink> }}>{text}</ReactMarkdown></div>;
-}
+});
 function UserText({ part }: { part: Json }) {
   const text = part.text as string;
   const body = messageBody(text);
@@ -51,7 +51,7 @@ function UserText({ part }: { part: Json }) {
   if (cursor < bytes.length) content.push(...linkedText(decoder.decode(bytes.subarray(cursor)), "text:" + cursor));
   return <div className="user-text-part">{content}{body.context && <details className="message-context"><summary>引用上下文</summary><pre>{body.context}</pre></details>}</div>;
 }
-const Item = memo(function Item({ item, active = false }: { item: Json; active?: boolean }) {
+const Item = memo(function Item({ item, active = false, timing }: { item: Json; active?: boolean; timing?: ReactNode }) {
   const implementPlan = useContext(PlanContext);
   switch (item.type) {
     case "userMessage": {
@@ -65,13 +65,13 @@ const Item = memo(function Item({ item, active = false }: { item: Json; active?:
       })}</div></div>;
     }
     case "agentMessage":
-      return <div className="message agent-message"><div className="message-label"><span className="codex-mark">✳</span> Codex</div><Markdown text={item.text || ""} /></div>;
+      return <div className="message agent-message"><div className="message-label"><span className="codex-mark">✳</span> Codex{timing}</div><Markdown text={item.text || ""} /></div>;
     case "plan":
-      return <section className="message plan-message" aria-label="Codex 计划"><div className="message-label"><ListChecks size={15} />计划</div><Markdown text={typeof item.text === "string" ? item.text : ""} />{!active && item.text?.trim() && implementPlan && <div className="plan-actions"><button type="button" className="primary small" onClick={() => implementPlan(item.text)}>实施此计划</button></div>}</section>;
+      return <section className="message plan-message" aria-label="Codex 计划"><div className="message-label"><ListChecks size={15} />计划{timing}</div><Markdown text={typeof item.text === "string" ? item.text : ""} />{!active && item.text?.trim() && implementPlan && <div className="plan-actions"><button type="button" className="primary small" onClick={() => implementPlan(item.text)}>实施此计划</button></div>}</section>;
     case "contextCompaction":
-      return <div className="command-transcript-note" role="status">{active ? "正在压缩会话上下文…" : "会话上下文已压缩"}</div>;
+      return <div className="command-transcript-note"><span role="status">{active ? "正在压缩会话上下文…" : "会话上下文已压缩"}</span>{timing}</div>;
     case "exitedReviewMode":
-      return <section className="message agent-message"><div className="message-label">代码审查结果</div><Markdown text={item.review || "审查已结束。"} /></section>;
+      return <section className="message agent-message"><div className="message-label">代码审查结果{timing}</div><Markdown text={item.review || "审查已结束。"} /></section>;
   }
 });
 function ProcessItems({ items, active }: { items: Json[]; active: boolean }) {
@@ -137,16 +137,20 @@ const Turn = memo(function Turn({ turn, running }: { turn: Json; running: boolea
   const results = items.filter(item => answers.has(item));
   const elapsed = elapsedTime(turn, active, now);
   const duration = elapsed.ms == null ? "用时未知" : `${elapsed.estimated ? "约 " : ""}${formatElapsed(elapsed.ms)}`;
-  const label = turn.status === "inProgress" && !running ? "状态待同步" : active ? `处理中${elapsed.ms == null ? "" : ` · ${duration}`}` : elapsed.ms == null ? "处理过程 · 用时未知" : `用时 ${duration}`;
+  const label = turn.status === "inProgress" && !running ? "状态待同步"
+    : active ? `处理中${elapsed.ms == null ? "" : ` · ${duration}`}`
+    : elapsed.ms == null ? (process.length ? `处理过程 · ${duration}` : duration)
+    : `用时 ${duration}`;
   const timingHint = elapsed.ms == null ? "此记录未提供完整计时数据" : elapsed.estimated ? "按本次连接收到的开始和结束时间估算" : "使用会话返回的处理用时";
+  const timing = !process.length ? <span className="turn-timing" title={timingHint}>{active && <Loader2 size={12} className="spin" aria-hidden="true" />}{label}</span> : undefined;
   return <section className="turn">
     {users.map(item => <Item key={item.id} item={item} />)}
     {Array.isArray(turn.plan) && !!turn.plan.length && <div className="turn-plan"><strong>执行计划</strong>{turn.planExplanation && <p>{turn.planExplanation}</p>}<ol>{turn.plan.map((step: Json, index: number) => <li key={index} data-status={step.status}>{step.step}{step.status === "inProgress" ? " · 进行中" : ""}</li>)}</ol></div>}
     {process.length > 0 ? <details className="turn-process" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
       <summary className="turn-process-summary" title={`${timingHint}；点击展开或收起处理过程`}><span>{active && <Loader2 size={14} className="spin" />}{label}</span><ChevronRight size={14} className="turn-process-chevron" /></summary>
       {expanded && <div className="turn-process-body"><ProcessItems items={process} active={active} /></div>}
-    </details> : <div className="turn-duration" title={timingHint}>{active && <Loader2 size={14} className="spin" />}{label}</div>}
-    {results.map(item => <Item key={item.id} item={item} active={active} />)}
+    </details> : !results.length && <div className="turn-status">{timing}</div>}
+    {results.map((item, index) => <Item key={item.id} item={item} active={active} timing={index === results.length - 1 ? timing : undefined} />)}
     {turn.status === "completed" && !results.length && !!process.length && <div className="turn-note">此回合没有最终答复，可展开处理过程查看。</div>}
     {turn.error && <div className="inline-error"><AlertCircle size={15} />{turn.error.message || output(turn.error)}</div>}
     {turn.status === "failed" && !turn.error && <div className="inline-error"><AlertCircle size={15} />此回合执行失败，可展开处理过程查看详情。</div>}
@@ -175,6 +179,15 @@ export function Transcript({ thread, running, older, hasOlder, loading, offline 
     if (saved && !saved.following && scroll.current) scroll.current.scrollTop = saved.top;
     else bottom.current?.scrollIntoView({ block: "end" });
   }, [thread.id]);
+  useLayoutEffect(() => {
+    const el = scroll.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (follow.current && !olderAnchor.current) bottom.current?.scrollIntoView({ block: "end", behavior: "auto" });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   const latest = () => { follow.current = true; setAway(false); bottom.current?.scrollIntoView({ block: "end", behavior: "auto" }); };
   return <ReferenceContext.Provider value={onReference}><PlanContext.Provider value={onImplementPlan}><div className="transcript-wrapper"><div className="transcript" ref={scroll} onScroll={() => {
     const el = scroll.current;

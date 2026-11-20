@@ -1,7 +1,6 @@
 :root[data-platform="android"] { --titlebar-height: 0px; font-family: "Roboto", "Noto Sans", "Noto Sans CJK SC", "Microsoft YaHei UI", sans-serif; }
 .is-android.app-frame { min-width: 0; }
 .is-android.app-frame>.app-shell { border: 0; }
-.mobile-device-toolbar { display: none; }
 .mobile-setting-action { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-top: 1px solid var(--line); }
 .mobile-setting-action>svg { color: var(--secondary); }
 .mobile-setting-action>div { display: grid; gap: 5px; flex: 1; min-width: 0; }
@@ -26,26 +25,24 @@
   .device-item { min-height: 60px; }
   .device-copy strong { font-size: 16px; }
   .device-more,.device-sidebar .icon-button { min-width: 44px; min-height: 44px; }
-  .device-row .device-more { opacity: 1; }
+  .device-row { grid-template-columns: minmax(0,1fr) 44px; }
+  .device-row .device-more { opacity: 1; pointer-events: auto; }
   .sidebar-footer-button { min-height: 52px; }
   .is-mobile.view-list .workspace,.is-mobile.view-conversation .thread-sidebar { display: none; }
   .thread-sidebar { width: 100%; border: 0; background: var(--surface-muted); }
-  .mobile-device-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 60px; padding: 4px 16px 0; }
-  .mobile-device-picker { display: flex; align-items: center; gap: 9px; min-width: 0; min-height: 44px; padding: 0; }
-  .mobile-device-picker strong { max-width: calc(100vw - 132px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
-  .thread-sidebar-top { min-height: 60px; padding: 4px 16px; }
-  .thread-sidebar h1 { font-size: 28px; letter-spacing: -.6px; }
+  .thread-sidebar-top { padding: 4px 10px 4px 16px; margin-bottom: 8px; }
+  .mobile-device-picker { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 44px; padding: 0; }
+  .mobile-device-picker strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+  .mobile-device-picker svg { flex-shrink: 0; }
   .icon-button { min-width: 44px; min-height: 44px; }
-  .search-box { margin: 0 16px 16px; padding: 0 12px; min-height: 44px; border-radius: 12px; }
+  .search-box { margin: 0 16px 10px; padding: 0 12px; min-height: 44px; border-radius: 12px; }
   .search-box input { min-height: 44px; font-size: 16px; }
   .thread-list { padding: 0 10px 8px; }
-  .project-heading { padding: 6px 0; }
-  .project-toggle { min-height: 48px; font-size: 15px; }
-  .thread-item { min-height: 56px; padding: 13px 12px; border-radius: 12px; }
-  .thread-item-title { font-size: 16px; }
-  .thread-row { border-radius: 12px; }
-  .thread-row .thread-archive { opacity: 1; min-width: 44px; min-height: 48px; margin-right: 2px; }
-  .thread-list-empty { display: grid; justify-items: center; gap: 20px; padding: 64px 24px; line-height: 1.8; }
+  .project-toggle,.project-title { height: 44px; }
+  .thread-row { --archive-width: 44px; }
+  .thread-item { height: 48px; }
+  .thread-row .thread-archive { height: 48px; }
+  .thread-list-empty { display: grid; justify-items: center; gap: 12px; padding: 32px 16px; }
   .archive-toggle { min-height: 52px; font-size: 14px; }
   .workspace { min-width: 0; width: 100%; }
   .workspace-toolbar { min-height: 56px; padding: 4px 10px 4px 4px; gap: 4px; }
@@ -60,7 +57,6 @@
   .conversation-notices .session-banner { padding: 10px 16px; }
   .conversation-column { width: 100%; min-width: 0; }
   .transcript { padding-left: 16px; padding-right: 16px; -webkit-overflow-scrolling: touch; }
-  .turn { padding-bottom: 24px; }
   .markdown { font-size: 16px; line-height: 1.8; }
   .markdown pre { max-width: 100%; font-size: 12px; }
   .markdown table { display: block; max-width: 100%; overflow-x: auto; }
@@ -79,11 +75,10 @@
   .stop-button { min-height: 44px; padding: 0 10px; }
   .context-usage { min-width: 32px; height: 44px; }
   .context-usage-tooltip { left: auto; right: 0; transform: none; max-width: min(280px,80vw); }
-  .message-queue { max-height: 116px; min-height: 44px; margin-bottom: 6px; border-radius: 12px; }
-  .message-queue-header { padding: 6px 10px; }
+  .message-queue { max-height: 116px; min-height: 44px; }
+  .message-queue-heading { padding: 6px 10px; }
   .queued-message { padding: 4px 8px; }
   .queued-message-actions .icon-button { min-width: 40px; min-height: 44px; }
-  .composer-goal { padding: 6px 10px; margin-bottom: 6px; }
   .mobile-approval-prompt { display: flex; align-items: center; gap: 10px; padding: 12px 16px; margin: 0 10px 4px; min-height: 48px; border-radius: 12px; color: var(--warning); background: var(--warning-soft); }
   .mobile-approval-prompt>span { flex: 1; text-align: left; font-weight: 600; }
   .approval-card { padding: 12px; border-radius: 12px; font-size: 14px; }
